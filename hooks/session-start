@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+from mlagent_memory.hooks import cwd_memory_root, hook_output, read_hook_input
+
+data = read_hook_input()
+root = cwd_memory_root(data)
+if root.exists():
+    message = f"MLagent project memory detected at {root}. Use /mlagent:start-modeling-session before modeling work."
+else:
+    message = "MLagent project memory not initialized in this cwd. Run mlagent-memory init when starting a new modeling memory repo."
+hook_output("SessionStart", message)

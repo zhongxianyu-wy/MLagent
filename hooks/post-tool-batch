@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+from mlagent_memory.hooks import hook_output, read_hook_input
+
+data = read_hook_input()
+calls = data.get("tool_calls", [])
+hook_output("PostToolBatch", f"MLagent observed a tool batch with {len(calls)} calls. Summarize only important modeling changes.")
