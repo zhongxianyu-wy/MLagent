@@ -5,6 +5,7 @@ import typer
 from mlagent_memory import __version__
 from mlagent_memory.errors import MemoryRepoNotFound
 from mlagent_memory.index import rebuild_index, search_index
+from mlagent_memory.knowledge import import_knowledge_file
 from mlagent_memory.repo import init_memory_repo, memory_status
 
 app = typer.Typer(no_args_is_help=True)
@@ -60,6 +61,18 @@ def search(
     hits = search_index(memory_root, query=query, asset_type=asset_type, limit=limit)
     for hit in hits:
         typer.echo(f"{hit['asset_type']} {hit['asset_id']} {hit['source_path']} {hit['title']}")
+
+
+@app.command("import-knowledge")
+def import_knowledge(
+    source: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    item_type: str = typer.Option("project_doc", "--type"),
+    tag: list[str] = typer.Option([], "--tag"),
+) -> None:
+    """Import a knowledge file into project_knowledge."""
+    item = import_knowledge_file(memory_root, source=source, item_type=item_type, tags=tag)
+    typer.echo(f"Imported knowledge: {item.id} {item.stored_path}")
 
 
 def main() -> None:
