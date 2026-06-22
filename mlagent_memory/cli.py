@@ -4,8 +4,11 @@ import typer
 
 from mlagent_memory import __version__
 from mlagent_memory.errors import MemoryRepoNotFound
+from mlagent_memory.experience import add_experience
 from mlagent_memory.index import rebuild_index, search_index
+from mlagent_memory.io import read_yaml
 from mlagent_memory.knowledge import import_knowledge_file
+from mlagent_memory.raw import add_raw_memory
 from mlagent_memory.repo import init_memory_repo, memory_status
 
 app = typer.Typer(no_args_is_help=True)
@@ -73,6 +76,26 @@ def import_knowledge(
     """Import a knowledge file into project_knowledge."""
     item = import_knowledge_file(memory_root, source=source, item_type=item_type, tags=tag)
     typer.echo(f"Imported knowledge: {item.id} {item.stored_path}")
+
+
+@app.command("add-raw")
+def add_raw(
+    record_path: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Add a raw memory YAML record."""
+    record = add_raw_memory(memory_root, read_yaml(record_path))
+    typer.echo(f"Added raw memory: {record.id}")
+
+
+@app.command("add-experience")
+def add_experience_command(
+    record_path: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Add an experience YAML record."""
+    record = add_experience(memory_root, read_yaml(record_path))
+    typer.echo(f"Added experience: {record.id}")
 
 
 def main() -> None:
