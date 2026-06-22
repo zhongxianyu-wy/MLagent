@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 
 import typer
 
 from mlagent_memory import __version__
+from mlagent_memory.context import create_context_pack
 from mlagent_memory.errors import MemoryRepoNotFound
 from mlagent_memory.experience import add_experience
 from mlagent_memory.index import rebuild_index, search_index
@@ -96,6 +98,18 @@ def add_experience_command(
     """Add an experience YAML record."""
     record = add_experience(memory_root, read_yaml(record_path))
     typer.echo(f"Added experience: {record.id}")
+
+
+@app.command("create-context-pack")
+def create_context_pack_command(
+    prompt: str = typer.Argument(...),
+    pack_type: str = typer.Option("exploration", "--pack-type"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    skill_version: str | None = typer.Option(None, "--skill-version"),
+) -> None:
+    """Create a task-specific Context Pack."""
+    pack = create_context_pack(memory_root, pack_type=pack_type, prompt=prompt, skill_version=skill_version)
+    typer.echo(json.dumps(pack.model_dump(), indent=2, ensure_ascii=True))
 
 
 def main() -> None:
