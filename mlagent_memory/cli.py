@@ -4,6 +4,7 @@ import typer
 
 from mlagent_memory import __version__
 from mlagent_memory.errors import MemoryRepoNotFound
+from mlagent_memory.index import rebuild_index, search_index
 from mlagent_memory.repo import init_memory_repo, memory_status
 
 app = typer.Typer(no_args_is_help=True)
@@ -39,6 +40,26 @@ def status(memory_root: Path = typer.Option(Path("project_memory"), "--memory-ro
     except MemoryRepoNotFound as exc:
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
+
+
+@app.command()
+def index(memory_root: Path = typer.Option(Path("project_memory"), "--memory-root")) -> None:
+    """Rebuild the SQLite FTS5 index."""
+    rebuild_index(memory_root)
+    typer.echo(f"Rebuilt index: {memory_root / 'indexes' / 'memory.sqlite'}")
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    asset_type: str | None = typer.Option(None, "--asset-type"),
+    limit: int = typer.Option(10, "--limit"),
+) -> None:
+    """Search indexed memory assets."""
+    hits = search_index(memory_root, query=query, asset_type=asset_type, limit=limit)
+    for hit in hits:
+        typer.echo(f"{hit['asset_type']} {hit['asset_id']} {hit['source_path']} {hit['title']}")
 
 
 def main() -> None:
