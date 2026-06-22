@@ -12,6 +12,7 @@ from mlagent_memory.io import read_yaml
 from mlagent_memory.knowledge import import_knowledge_file
 from mlagent_memory.raw import add_raw_memory
 from mlagent_memory.repo import init_memory_repo, memory_status
+from mlagent_memory.skill_versions import approve_skill_candidate, create_skill_candidate
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -110,6 +111,32 @@ def create_context_pack_command(
     """Create a task-specific Context Pack."""
     pack = create_context_pack(memory_root, pack_type=pack_type, prompt=prompt, skill_version=skill_version)
     typer.echo(json.dumps(pack.model_dump(), indent=2, ensure_ascii=True))
+
+
+@app.command("create-skill-candidate")
+def create_skill_candidate_command(
+    version: str = typer.Option(..., "--version"),
+    name: str = typer.Option(..., "--name"),
+    source_type: str = typer.Option(..., "--source-type"),
+    source_evidence: list[str] = typer.Option([], "--source-evidence"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Create a pending SkillVersion candidate."""
+    candidate = create_skill_candidate(memory_root, version, name, source_type, source_evidence)
+    typer.echo(f"Created SkillVersion candidate: {candidate.version}")
+
+
+@app.command("approve-skill")
+def approve_skill_command(
+    version: str = typer.Option(..., "--version"),
+    reviewer: str = typer.Option(..., "--reviewer"),
+    approval_note: str = typer.Option(..., "--approval-note"),
+    performance_path: Path = typer.Option(..., "--performance-path"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Approve a SkillVersion candidate after human performance review."""
+    approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path)
+    typer.echo(f"Approved SkillVersion: {approved.version}")
 
 
 def main() -> None:
