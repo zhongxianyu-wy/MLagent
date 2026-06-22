@@ -32,6 +32,7 @@ Claude Code Plugin
   ├─ hooks/
   │  ├─ session-start
   │  ├─ post-tool-use
+  │  ├─ post-tool-batch
   │  └─ stop
   ├─ bin/mlagent-memory
   └─ optional MCP
@@ -51,6 +52,52 @@ The Claude Code Plugin is installed once and provides workflow skills, hooks, an
 Each modeling project owns an independent Project Memory Repo. The repo is stored with the project and can migrate with it. All durable assets use human-readable Markdown, YAML, or original imported files. `indexes/` contains only rebuildable SQLite FTS5 indexes.
 
 MCP is a second-stage option. The MVP uses `bin/mlagent-memory` as the stable interface for deterministic operations.
+
+### 2.1 Technology Stack and Reuse Map
+
+The MVP uses a file-first architecture with a small Python toolchain. Durable assets stay in Markdown, YAML, and copied source files. Databases and indexes are accelerators only.
+
+Research references:
+
+- [MLagent reuse survey](../../superpowers/reports/2026-06-22-mlagent-reuse-survey.md)
+- [M1 agent memory systems](../../research/2026-06-22-m1-agent-memory-systems.md)
+- [M2 knowledge ingestion](../../research/2026-06-22-m2-knowledge-ingestion.md)
+- [M3 SQLite FTS5 index](../../research/2026-06-22-m3-sqlite-fts5-index.md)
+- [M4 Claude Code plugin](../../research/2026-06-22-m4-claude-code-plugin.md)
+- [M5 context packs](../../research/2026-06-22-m5-context-packs.md)
+- [M6 SkillVersion registry](../../research/2026-06-22-m6-skillversion-registry.md)
+
+| Function | MVP technology | Reusable projects | Reuse mode |
+|---|---|---|---|
+| Claude Code plugin shell | Official plugin layout with `.claude-plugin/plugin.json`, `skills/`, `hooks/hooks.json`, `bin/` | `obra/superpowers`, Anthropic official plugin examples | Fork or closely copy the skeleton and hook patterns |
+| CLI | Python, Typer, Pydantic v2, PyYAML or ruamel.yaml | `tiangolo/typer`, `pydantic` | Runtime dependency |
+| YAML schema validation | Pydantic models over loaded YAML dictionaries | Pydantic v2 | Runtime dependency |
+| Knowledge import | `pypdf` for basic PDF, direct text read for TXT/MD/YAML, optional `markdownify` for HTML | `py-pdf/pypdf`, `langchain-text-splitters`, `markdownify` | Runtime dependency for narrow subcomponents |
+| Text chunking | Recursive and Markdown-aware chunking | `langchain-text-splitters` | Runtime dependency, not full LangChain |
+| Search index | SQLite FTS5 through `sqlite-utils`, with standard-library `sqlite3` detection and fallback | `simonw/sqlite-utils`, SQLite FTS5 | Runtime dependency plus standard-library fallback |
+| Three-layer memory model | Self-owned YAML schemas | `langmem`, `A-MEM`, `Graphiti` | Borrow data-model ideas only |
+| Experience distillation | Claude Code / LLM-guided summarization into schema-checked YAML | `langmem` memory-manager pattern | Borrow prompt and schema pattern only |
+| Context Pack assembly | Custom pack generator with fixed MLagent priority tables | `anthropics/skills`, `Agent-Skills-for-Context-Engineering`, `obra/superpowers` | Borrow progressive loading and filesystem-context rules |
+| SkillVersion registry | File-backed version registry with human approval state | `iterative/mlem`, `operatorai/modelstore`, Git PR review pattern | Borrow schema and lifecycle ideas only |
+| Optional second-stage MCP | Python MCP SDK FastMCP | `modelcontextprotocol/python-sdk` | Deferred, not MVP |
+
+The MVP should not import full memory runtimes or RAG frameworks. `mem0`, `letta`, `cognee`, `graphiti`, LangChain, LlamaIndex, Unstructured, MLflow, DVC, Optuna, and workflow orchestrators are reference material only unless a later phase explicitly changes scope.
+
+### 2.2 Dependency Policy
+
+Default runtime dependencies should stay small and local:
+
+```text
+typer
+pydantic
+pyyaml or ruamel.yaml
+pypdf
+langchain-text-splitters
+sqlite-utils
+markdownify optional
+```
+
+The MVP must avoid dependencies that require GPU stacks, persistent services, vector databases, or heavyweight PDF/OCR pipelines. In particular, do not default to PyMuPDF because of AGPL distribution risk, Marker because of torch and GPL weight, Docling standard mode because it pulls heavy ML dependencies, or any vector database.
 
 ## 3. Project Memory Structure
 
@@ -158,7 +205,9 @@ indexes/
   └─ memory.sqlite
 ```
 
-The MVP uses SQLite FTS5 as the default index. Indexes are rebuildable and never serve as the sole source of any durable asset.
+The MVP uses SQLite FTS5 as the default index. `sqlite-utils` is the preferred wrapper because it supports FTS enablement, upsert by primary key, and rebuild operations. The standard-library `sqlite3` module should be used to detect FTS5 availability and can serve as a fallback implementation.
+
+Indexes are rebuildable and never serve as the sole source of any durable asset.
 
 ## 4. On-Demand Loading and Context Packs
 
@@ -349,7 +398,7 @@ Responsibilities:
 
 ### 6.2 Hooks
 
-Hooks should be conservative.
+Hooks should be conservative. Plugin hooks must live in `hooks/hooks.json`, aligned with the Claude Code plugin layout. The MVP starts with command hooks; more advanced prompt or agent hooks are not required.
 
 ```text
 session-start
@@ -361,6 +410,10 @@ post-tool-use
   -> Capture key command summaries, file-change summaries, and result signals
   -> Write raw_memory drafts
   -> Do not store full logs unless explicitly requested
+
+post-tool-batch
+  -> Prefer one batch summary when many tool calls happen together
+  -> Reduce noise compared with one record per low-value tool event
 
 stop
   -> Generate session summary
@@ -375,6 +428,7 @@ Safety rules:
 - Formal SkillVersion insertion requires `performance.yaml`.
 - `indexes/` cannot contain the only copy of any asset.
 - Knowledge import copies source files by default and records hash and source path.
+- `SessionStart` output must stay small and should use additional context only for status, manifest, and routing hints.
 
 ## 7. Data Schemas
 
@@ -386,6 +440,8 @@ YAML is for validation, retrieval, and automation.
 ```
 
 CLI validation should use Pydantic or an equivalent schema layer.
+
+Typer does not replace Pydantic. Typer handles CLI parsing; Pydantic validates YAML data after loading it into dictionaries.
 
 ### 7.1 Raw Memory
 
@@ -425,6 +481,7 @@ next_steps:
 ```yaml
 id: exp_20260622_001
 type: lesson | pitfall | successful_pattern | failed_direction
+object_type: experience
 summary: "Short summary"
 detail: "Full experience description"
 confidence: low | medium | high
@@ -439,8 +496,14 @@ related_data_fields:
   - "age"
 related_methods:
   - "xgboost"
+related:
+  - "exp_20260621_003"
+valid_from: "2026-06-22T10:30:00+08:00"
+superseded_by: null
 created_at: "2026-06-22T10:30:00+08:00"
 ```
+
+The experience schema borrows three ideas without importing their runtimes: LangMem-style episodic fields, A-MEM-style atomic cards and related links, and Graphiti-style temporal validity.
 
 ### 7.3 Knowledge Registry
 
@@ -464,10 +527,19 @@ index_status: indexed
 ```yaml
 version: "v001"
 name: "xgboost_baseline_retrain"
+object_type: skill_version
+state: approved
 source_type: best_run | ipynb_import
 source_evidence:
   - "raw_memory/runs/raw_20260622_001.yaml"
   - "evidence/notebooks/baseline.ipynb"
+artifacts:
+  - path: "skill_versions/v001_xgboost_baseline_retrain/reproduce.md"
+    sha256: "..."
+requirements:
+  python: ">=3.10"
+  packages:
+    - "scikit-learn==..."
 human_review:
   reviewed: true
   reviewer: "Reviewer name"
@@ -494,7 +566,11 @@ reproducibility:
   allowed_changes:
     - "new sample path"
     - "output directory"
+valid_from: "2026-06-22T11:00:00+08:00"
+superseded_by: null
 ```
+
+The SkillVersion schema borrows MLEM's `object_type`, `artifacts`, `requirements`, and free-extension pattern; modelstore's lifecycle-state idea; and Graphiti's temporal versioning idea. It remains an MLagent-owned YAML schema.
 
 ## 8. Insertion Rules
 
@@ -503,6 +579,8 @@ reproducibility:
 - `project_knowledge`: import copies the original file by default, extracts text, and indexes it.
 - `skill_versions`: can only be formally inserted by `approve-skill` after human review confirms benchmark performance.
 - `indexes`: generated by CLI only and never serve as durable asset source.
+- SkillVersion states are `draft`, `pending_review`, `approved`, `rejected`, and `archived`.
+- The MVP must not build a custom approval service. Local explicit CLI approval is sufficient for single-machine use; when the project is managed through hosted Git, Git PR review is the preferred approval gate and audit trail.
 
 ## 9. MVP Scope
 
