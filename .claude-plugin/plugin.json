@@ -1,0 +1,10 @@
+{
+  "name": "mlagent",
+  "description": "Project-level machine learning modeling memory and workflow guidance for Claude Code",
+  "version": "0.1.0",
+  "author": {
+    "name": "MLagent"
+  },
+  "license": "MIT",
+  "keywords": ["machine-learning", "memory", "modeling", "claude-code", "skills"]
+}
