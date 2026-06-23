@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from shutil import copytree, move, rmtree
+from shutil import copytree, move
 from typing import Any
 
 from pydantic import ValidationError
@@ -23,9 +23,19 @@ def create_skill_candidate(
     name: str,
     source_type: str,
     source_evidence: list[str],
+    replace: bool = False,
 ) -> SkillVersion:
     require_memory_repo(root)
     candidate_dir = root / "skill_versions/.candidates" / version
+    if candidate_dir.exists():
+        if not replace:
+            raise SkillVersionAlreadyExists(
+                f"SkillVersion candidate already exists: {version} "
+                "(pass replace=True to archive the old candidate and rebuild)"
+            )
+        archive_dir = root / "skill_versions/.archive/candidates" / f"{version}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        archive_dir.parent.mkdir(parents=True, exist_ok=True)
+        move(str(candidate_dir), str(archive_dir))
     candidate_dir.mkdir(parents=True, exist_ok=True)
 
     data = {
@@ -58,7 +68,6 @@ def approve_skill_candidate(
     reviewer: str,
     approval_note: str,
     performance_path: Path,
-    replace: bool = False,
 ) -> SkillVersion:
     require_memory_repo(root)
     candidate_dir = root / "skill_versions/.candidates" / version
@@ -85,15 +94,10 @@ def approve_skill_candidate(
     approved = SkillVersion(**data)
 
     if approved_dir.exists():
-        if not replace:
-            raise SkillVersionAlreadyExists(
-                f"Approved SkillVersion already exists: {version} "
-                "(pass replace=True to archive the old version and replace it)"
-            )
-        archive_dir = root / "skill_versions" / ".archive" / f"{version}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-        archive_dir.parent.mkdir(parents=True, exist_ok=True)
-        rmtree(archive_dir) if archive_dir.exists() else None
-        move(str(approved_dir), str(archive_dir))
+        raise SkillVersionAlreadyExists(
+            f"Approved SkillVersion already exists: {version}. "
+            "Approved versions are immutable; create a new version instead of replacing."
+        )
     copytree(candidate_dir, approved_dir)
     write_yaml(approved_dir / "skill.yaml", approved.model_dump(exclude_none=True))
     write_yaml(approved_dir / "performance.yaml", validated_performance.model_dump())

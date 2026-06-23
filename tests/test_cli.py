@@ -175,7 +175,7 @@ def test_cli_list_skills_and_get_skill(tmp_path):
     assert rejected.exit_code == 2
 
 
-def test_cli_approve_rejects_duplicate_then_replace(tmp_path):
+def test_cli_approve_rejects_duplicate(tmp_path):
     root = tmp_path / "project_memory"
     runner.invoke(app, ["init", "--memory-root", str(root), "--project-name", "demo"], catch_exceptions=False)
     runner.invoke(app, ["create-skill-candidate", "--memory-root", str(root), "--version", "v1", "--name", "b", "--source-type", "best_run", "--source-evidence", "r.yaml"], catch_exceptions=False)
@@ -185,8 +185,15 @@ def test_cli_approve_rejects_duplicate_then_replace(tmp_path):
     assert first.exit_code == 0
     dup = runner.invoke(app, ["approve-skill", "--memory-root", str(root), "--version", "v1", "--reviewer", "h2", "--approval-note", "ok", "--performance-path", str(perf)], catch_exceptions=False)
     assert dup.exit_code == 2
-    rep = runner.invoke(app, ["approve-skill", "--memory-root", str(root), "--version", "v1", "--reviewer", "h2", "--approval-note", "ok", "--performance-path", str(perf), "--replace"], catch_exceptions=False)
-    assert rep.exit_code == 0
+
+
+def test_cli_create_skill_candidate_rejects_duplicate(tmp_path):
+    root = tmp_path / "project_memory"
+    runner.invoke(app, ["init", "--memory-root", str(root), "--project-name", "demo"], catch_exceptions=False)
+    first = runner.invoke(app, ["create-skill-candidate", "--memory-root", str(root), "--version", "v1", "--name", "b", "--source-type", "best_run", "--source-evidence", "r.yaml"], catch_exceptions=False)
+    assert first.exit_code == 0
+    dup = runner.invoke(app, ["create-skill-candidate", "--memory-root", str(root), "--version", "v1", "--name", "b", "--source-type", "best_run", "--source-evidence", "r.yaml"], catch_exceptions=False)
+    assert dup.exit_code == 2
 
 
 def test_cli_context_pack_json_is_not_ascii_escaped(tmp_path):

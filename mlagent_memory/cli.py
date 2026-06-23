@@ -123,9 +123,14 @@ def create_skill_candidate_command(
     source_type: str = typer.Option(..., "--source-type"),
     source_evidence: list[str] = typer.Option([], "--source-evidence"),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
     """Create a pending SkillVersion candidate."""
-    candidate = create_skill_candidate(memory_root, version, name, source_type, source_evidence)
+    try:
+        candidate = create_skill_candidate(memory_root, version, name, source_type, source_evidence, replace=replace)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
     typer.echo(f"Created SkillVersion candidate: {candidate.version}")
 
 
@@ -136,11 +141,10 @@ def approve_skill_command(
     approval_note: str = typer.Option(..., "--approval-note"),
     performance_path: Path = typer.Option(..., "--performance-path"),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
-    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
     """Approve a SkillVersion candidate after human performance review."""
     try:
-        approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path, replace=replace)
+        approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path)
     except MlagentError as exc:
         typer.echo(str(exc))
         raise typer.Exit(2) from exc

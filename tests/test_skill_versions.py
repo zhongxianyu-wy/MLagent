@@ -167,7 +167,7 @@ def test_get_skill_approved_and_candidate_and_missing(tmp_path):
         get_skill(root, "nope")
 
 
-def test_approve_rejects_duplicate_unless_replace(tmp_path):
+def test_approve_skill_is_immutable(tmp_path):
     root = tmp_path / "project_memory"
     init_memory_repo(root, project_name="demo", primary_metric="auc")
     create_skill_candidate(root, version="v1", name="b", source_type="best_run", source_evidence=["r"])
@@ -176,9 +176,33 @@ def test_approve_rejects_duplicate_unless_replace(tmp_path):
     approve_skill_candidate(root, version="v1", reviewer="h1", approval_note="first", performance_path=perf)
     with pytest.raises(SkillVersionAlreadyExists):
         approve_skill_candidate(root, version="v1", reviewer="h2", approval_note="second", performance_path=perf)
-    # replace archives the old and approves the new
-    approve_skill_candidate(root, version="v1", reviewer="h2", approval_note="second", performance_path=perf, replace=True)
-    from mlagent_memory.io import read_yaml
-    assert read_yaml(root / "skill_versions/v1/skill.yaml")["human_review"]["reviewer"] == "h2"
-    archives = list((root / "skill_versions/.archive").glob("v1_*"))
+
+
+def test_create_skill_candidate_rejects_duplicate_by_default(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"])
+    with pytest.raises(SkillVersionAlreadyExists):
+        create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"])
+
+
+def test_create_skill_candidate_preserves_human_draft_without_replace(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"])
+    reproduce = root / "skill_versions/.candidates/v1/reproduce.md"
+    reproduce.write_text("HUMAN DRAFT\n", encoding="utf-8")
+    with pytest.raises(SkillVersionAlreadyExists):
+        create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"])
+    assert reproduce.read_text(encoding="utf-8") == "HUMAN DRAFT\n"
+
+
+def test_create_skill_candidate_replace_archives_old(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"])
+    create_skill_candidate(root, version="v1", name="baseline", source_type="best_run", source_evidence=["raw"], replace=True)
+    archives = list((root / "skill_versions/.archive/candidates").glob("v1_*"))
     assert len(archives) == 1
+    # new candidate still exists and is usable
+    assert (root / "skill_versions/.candidates/v1/skill.yaml").exists()
