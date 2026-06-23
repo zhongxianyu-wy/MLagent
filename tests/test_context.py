@@ -93,3 +93,20 @@ def test_retraining_pack_requires_approved_skill(tmp_path):
     import pytest
     with pytest.raises(SkillVersionNotFound):
         create_context_pack(root, pack_type="retraining", prompt="retrain", skill_version="v_draft")
+
+
+def test_exploration_pack_does_not_return_full_knowledge_note(tmp_path):
+    from mlagent_memory.context import create_context_pack
+    from mlagent_memory.index import rebuild_index
+    from mlagent_memory.knowledge import import_knowledge_file
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    src = tmp_path / "paper.md"
+    src.write_text("# A\nalpha\n\n# B\nbeta leakage\n", encoding="utf-8")
+    import_knowledge_file(root, src, item_type="paper", tags=[])
+    rebuild_index(root)
+    pack = create_context_pack(root, pack_type="exploration", prompt="leakage")
+    knowledge_hits = next(s for s in pack.sections if s["name"] == "project_knowledge")["content"]
+    assert knowledge_hits
+    assert all("## Extracted Text" not in hit["content"] for hit in knowledge_hits)

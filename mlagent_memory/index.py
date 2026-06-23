@@ -29,7 +29,9 @@ def _collect_documents(root: Path) -> list[dict[str, str]]:
             {
                 "asset_id": str(data["id"]),
                 "asset_type": "experience",
+                "chunk_id": "",
                 "source_path": str(path.relative_to(root)),
+                "parent_path": "",
                 "title": str(data.get("summary", data["id"])),
                 "content": f"{data.get('summary', '')}\n{data.get('detail', '')}",
                 "confidence": str(data.get("confidence", "")),
@@ -39,20 +41,51 @@ def _collect_documents(root: Path) -> list[dict[str, str]]:
             }
         )
 
-    for path in (root / "project_knowledge/notes").rglob("*.md"):
-        docs.append(
-            {
-                "asset_id": path.stem,
-                "asset_type": "knowledge",
-                "source_path": str(path.relative_to(root)),
-                "title": path.stem,
-                "content": read_text(path),
-                "confidence": "",
-                "needs_review": "",
-                "exp_type": "",
-                "superseded_by": "",
-            }
-        )
+    notes_dir = root / "project_knowledge/notes"
+    chunks_root = root / "project_knowledge/chunks"
+    if notes_dir.exists():
+        for note_path in sorted(notes_dir.glob("*.md")):
+            know_id = note_path.stem
+            know_chunks_dir = chunks_root / know_id if chunks_root.exists() else None
+            chunk_files = (
+                sorted(know_chunks_dir.glob("chunk_*.md"))
+                if know_chunks_dir and know_chunks_dir.exists()
+                else []
+            )
+            if chunk_files:
+                note_rel = str(note_path.relative_to(root))
+                for chunk_path in chunk_files:
+                    docs.append(
+                        {
+                            "asset_id": know_id,
+                            "asset_type": "knowledge",
+                            "chunk_id": f"{know_id}_{chunk_path.stem}",
+                            "source_path": str(chunk_path.relative_to(root)),
+                            "parent_path": note_rel,
+                            "title": know_id,
+                            "content": read_text(chunk_path),
+                            "confidence": "",
+                            "needs_review": "",
+                            "exp_type": "",
+                            "superseded_by": "",
+                        }
+                    )
+            else:
+                docs.append(
+                    {
+                        "asset_id": know_id,
+                        "asset_type": "knowledge",
+                        "chunk_id": "",
+                        "source_path": str(note_path.relative_to(root)),
+                        "parent_path": "",
+                        "title": know_id,
+                        "content": read_text(note_path),
+                        "confidence": "",
+                        "needs_review": "",
+                        "exp_type": "",
+                        "superseded_by": "",
+                    }
+                )
 
     return docs
 
@@ -72,7 +105,9 @@ def rebuild_index(root: Path) -> None:
         {
             "asset_id": str,
             "asset_type": str,
+            "chunk_id": str,
             "source_path": str,
+            "parent_path": str,
             "title": str,
             "content": str,
             "confidence": str,
@@ -80,11 +115,11 @@ def rebuild_index(root: Path) -> None:
             "exp_type": str,
             "superseded_by": str,
         },
-        pk=("asset_id", "asset_type"),
+        pk=("asset_id", "asset_type", "chunk_id"),
     )
     documents = _collect_documents(root)
     if documents:
-        db["documents"].insert_all(documents, pk=("asset_id", "asset_type"), replace=True)
+        db["documents"].insert_all(documents, pk=("asset_id", "asset_type", "chunk_id"), replace=True)
     db["documents"].enable_fts(["title", "content"], create_triggers=True)
 
     registry_path = root / "project_knowledge/registry.yaml"

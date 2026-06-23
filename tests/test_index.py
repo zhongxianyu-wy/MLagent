@@ -78,3 +78,35 @@ def test_rebuild_index_updates_registry_index_status(tmp_path):
     assert read_yaml(root / "project_knowledge/registry.yaml")["items"][0]["index_status"] == "pending"
     rebuild_index(root)
     assert read_yaml(root / "project_knowledge/registry.yaml")["items"][0]["index_status"] == "indexed"
+
+
+def test_knowledge_search_returns_chunk_level_hits(tmp_path):
+    from mlagent_memory.knowledge import import_knowledge_file
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    src = tmp_path / "paper.md"
+    src.write_text("# A\nalpha\n\n# B\nbeta leakage\n", encoding="utf-8")
+    import_knowledge_file(root, src, item_type="paper", tags=[])
+    rebuild_index(root)
+    hits = search_index(root, "leakage", asset_type="knowledge")
+    assert hits
+    assert "chunk_id" in hits[0]
+    assert hits[0]["chunk_id"]  # non-empty chunk_id for imported knowledge
+    assert hits[0]["asset_id"].startswith("know_")
+    assert "leakage" in hits[0]["content"]
+    assert "## Extracted Text" not in hits[0]["content"]
+
+
+def test_knowledge_search_back_compat_indexes_direct_note(tmp_path):
+    """A note written directly (no chunks dir) is still indexed as one doc."""
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.io import write_text
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    write_text(root / "project_knowledge/notes/know_001.md", "# Transformer\nAttention method note")
+    rebuild_index(root)
+    hits = search_index(root, "attention", asset_type="knowledge")
+    assert len(hits) == 1

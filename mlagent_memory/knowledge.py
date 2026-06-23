@@ -75,6 +75,37 @@ def import_knowledge_file(root: Path, source: Path, item_type: str, tags: list[s
         ),
     )
 
+    chunks_to_write = chunks if chunks else ([text] if text.strip() else [])
+    chunk_dir = root / "project_knowledge/chunks" / item_id
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    manifest_chunks = []
+    for index, chunk in enumerate(chunks_to_write, 1):
+        stem = f"chunk_{index:04d}"
+        chunk_path = chunk_dir / f"{stem}.md"
+        write_text(chunk_path, chunk)
+        manifest_chunks.append(
+            {
+                "chunk_id": f"{item_id}_{stem}",
+                "path": str(chunk_path.relative_to(root)),
+                "char_count": len(chunk),
+            }
+        )
+    is_markdown = source.suffix.lower() in {".md", ".markdown"}
+    write_yaml(
+        chunk_dir / "manifest.yaml",
+        {
+            "knowledge_id": item_id,
+            "original_filename": source.name,
+            "sha256": digest,
+            "chunking": {
+                "strategy": "markdown_headers" if is_markdown else "recursive_character",
+                "chunk_size": None if is_markdown else 800,
+                "chunk_overlap": None if is_markdown else 120,
+            },
+            "chunks": manifest_chunks,
+        },
+    )
+
     item = KnowledgeItem(
         id=item_id,
         type=item_type,
