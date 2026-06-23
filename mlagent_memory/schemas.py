@@ -101,3 +101,21 @@ class ContextPack(BaseModel):
     pack_type: Literal["exploration", "retraining", "distillation", "skill_candidate"]
     prompt: str
     sections: list[dict[str, Any]]
+
+
+class PrimaryMetric(BaseModel):
+    name: str
+    value: float
+
+
+class BenchmarkMetric(BaseModel):
+    name: str
+    value: float
+
+
+class Performance(BaseModel):
+    primary_metric: PrimaryMetric
+    dataset_version: str
+    validation_protocol: str
+    benchmark_metric: BenchmarkMetric | None = None
+    target_or_acceptance_note: str | None = None

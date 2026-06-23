@@ -5,14 +5,14 @@ import typer
 
 from mlagent_memory import __version__
 from mlagent_memory.context import create_context_pack
-from mlagent_memory.errors import MemoryRepoNotFound
+from mlagent_memory.errors import MemoryRepoNotFound, MlagentError
 from mlagent_memory.experience import add_experience
 from mlagent_memory.index import rebuild_index, search_index
 from mlagent_memory.io import read_yaml
 from mlagent_memory.knowledge import import_knowledge_file
 from mlagent_memory.raw import add_raw_memory
 from mlagent_memory.repo import init_memory_repo, memory_status
-from mlagent_memory.skill_versions import approve_skill_candidate, create_skill_candidate
+from mlagent_memory.skill_versions import approve_skill_candidate, create_skill_candidate, get_skill, list_skills
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -135,14 +135,50 @@ def approve_skill_command(
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
 ) -> None:
     """Approve a SkillVersion candidate after human performance review."""
-    approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path)
+    try:
+        approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
     typer.echo(f"Approved SkillVersion: {approved.version}")
+
+
+@app.command("list-skills")
+def list_skills_command(
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """List approved SkillVersions from the registry."""
+    versions = list_skills(memory_root)
+    if not versions:
+        typer.echo("No approved SkillVersions.")
+        return
+    for entry in versions:
+        metric = entry.get("primary_metric", {}) or {}
+        typer.echo(
+            f"{entry.get('version')} | {entry.get('state')} | {entry.get('name')} | "
+            f"reviewer={entry.get('reviewer')} | {metric.get('name')}={metric.get('value')}"
+        )
+
+
+@app.command("get-skill")
+def get_skill_command(
+    version: str = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    include_draft: bool = typer.Option(False, "--include-draft"),
+) -> None:
+    """Show a SkillVersion bundle. Approved by default; --include-draft for candidates."""
+    try:
+        bundle = get_skill(memory_root, version, include_draft=include_draft)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(json.dumps(bundle, indent=2, ensure_ascii=True))
 
 
 def main() -> None:
     try:
         app()
-    except MemoryRepoNotFound as exc:
+    except MlagentError as exc:
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
 
