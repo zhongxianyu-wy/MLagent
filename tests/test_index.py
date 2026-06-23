@@ -127,3 +127,22 @@ def test_knowledge_search_matches_header_keyword(tmp_path):
     hits = search_index(root, "leakage", asset_type="knowledge")
     assert hits, "header keyword 'leakage' should be searchable"
 
+
+def test_search_multi_word_query_uses_or_recall(tmp_path):
+    """A natural-language multi-word query must not require ALL terms (FTS5 implicit AND).
+    It should match documents sharing any term (OR recall)."""
+    from mlagent_memory.knowledge import import_knowledge_file
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    src = tmp_path / "doc.md"
+    src.write_text("# Notes\nThe model overfits on small samples.\n", encoding="utf-8")
+    import_knowledge_file(root, src, item_type="method_note", tags=[])
+    rebuild_index(root)
+    # "reduce overfits quickly" contains no full phrase from the doc, but the token "overfits"
+    # matches — verifying a multi-word query OR-matches on any shared token (not implicit AND).
+    hits = search_index(root, "reduce overfits quickly", asset_type="knowledge")
+    assert hits, "multi-word query should OR-match on a shared token ('overfits')"
+
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -8,6 +9,18 @@ from sqlite_utils import Database
 from mlagent_memory.constants import INDEX_RELATIVE_PATH
 from mlagent_memory.io import read_text, read_yaml, write_yaml
 from mlagent_memory.repo import require_memory_repo
+
+
+def _to_fts_query(query: str) -> str:
+    """Convert a natural-language query into an FTS5 OR query of alphanumeric tokens.
+
+    FTS5 treats whitespace-separated tokens as implicit AND, so a natural sentence
+    like "Improve AUC without leakage" rarely matches a single document. For a
+    recall-oriented memory search, OR-ing the tokens (ranked by relevance) surfaces
+    relevant records that share any term. A single-token query is unchanged.
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", query)
+    return " OR ".join(tokens) if tokens else query
 
 
 def fts5_available() -> bool:
@@ -162,5 +175,5 @@ def search_index(
     if exclude_superseded:
         where_parts.append("(superseded_by = '' OR superseded_by IS NULL)")
     where = " AND ".join(where_parts) if where_parts else None
-    rows = db["documents"].search(query, where=where, where_args=(args if args else None), limit=limit)
+    rows = db["documents"].search(_to_fts_query(query), where=where, where_args=(args if args else None), limit=limit)
     return [dict(row) for row in rows]
