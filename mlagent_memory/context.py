@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from mlagent_memory.errors import SkillVersionNotFound
 from mlagent_memory.index import search_index
 from mlagent_memory.io import read_text, read_yaml
 from mlagent_memory.repo import require_memory_repo
 from mlagent_memory.schemas import ContextPack
+from mlagent_memory.skill_versions import get_skill
 
 
 def _safe_text(path: Path) -> str:
@@ -31,7 +33,7 @@ def _exploration_pack(root: Path, prompt: str) -> ContextPack:
                 ]
             ).strip(),
         },
-        {"name": "experience", "content": search_index(root, prompt, asset_type="experience", limit=5)},
+        {"name": "experience", "content": search_index(root, prompt, asset_type="experience", limit=5, confidence_levels=["high", "medium"], exclude_unreviewed=True, exclude_superseded=True)},
         {"name": "project_knowledge", "content": search_index(root, prompt, asset_type="knowledge", limit=5)},
         {"name": "skill_versions", "content": _skill_versions_list(root)},
     ]
@@ -39,14 +41,17 @@ def _exploration_pack(root: Path, prompt: str) -> ContextPack:
 
 
 def _retraining_pack(root: Path, prompt: str, skill_version: str) -> ContextPack:
-    version_dir = root / "skill_versions" / skill_version
-    if not version_dir.exists():
-        raise FileNotFoundError(f"SkillVersion not found: {skill_version}")
+    bundle = get_skill(root, skill_version)
+    if bundle.get("state") != "approved":
+        raise SkillVersionNotFound(f"SkillVersion {skill_version} is not approved (state={bundle.get('state')})")
+    files = bundle.get("files") or {}
     sections = [
         {"name": "current_prompt", "content": prompt},
-        {"name": "skill_version", "content": _safe_text(version_dir / "reproduce.md")},
-        {"name": "constraints", "content": _safe_text(version_dir / "constraints.md")},
-        {"name": "validation_checklist", "content": _safe_text(version_dir / "validation_checklist.md")},
+        {"name": "skill", "content": bundle.get("skill", {})},
+        {"name": "performance", "content": files.get("performance.yaml", "")},
+        {"name": "reproduce", "content": files.get("reproduce.md", "")},
+        {"name": "constraints", "content": files.get("constraints.md", "")},
+        {"name": "validation_checklist", "content": files.get("validation_checklist.md", "")},
         {"name": "data_understanding", "content": _safe_text(root / "data_understanding/dataset_card.md")},
     ]
     return ContextPack(pack_type="retraining", prompt=prompt, sections=sections)

@@ -46,3 +46,35 @@ def test_search_index_returns_empty_when_no_index(tmp_path):
     # No rebuild_index call -> no FTS index exists.
     assert search_index(root, "anything") == []
     assert search_index(root, "leakage", asset_type="experience") == []
+
+
+def test_search_index_filters_experience_by_confidence(tmp_path):
+    from mlagent_memory.experience import add_experience
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    add_experience(root, {"id": "e_high", "type": "pitfall", "summary": "leakage high", "detail": "d", "confidence": "high", "needs_review": False, "source_raw_records": ["r"], "created_at": "2026-06-22T10:00:00+08:00"})
+    add_experience(root, {"id": "e_low", "type": "pitfall", "summary": "leakage low", "detail": "d", "confidence": "low", "needs_review": False, "source_raw_records": ["r"], "created_at": "2026-06-22T10:00:00+08:00"})
+    add_experience(root, {"id": "e_review", "type": "pitfall", "summary": "leakage review", "detail": "d", "confidence": "high", "needs_review": True, "source_raw_records": ["r"], "created_at": "2026-06-22T10:00:00+08:00"})
+    rebuild_index(root)
+    hits = search_index(root, "leakage", asset_type="experience", confidence_levels=["high", "medium"], exclude_unreviewed=True, exclude_superseded=True)
+    ids = {h["asset_id"] for h in hits}
+    assert "e_high" in ids
+    assert "e_low" not in ids
+    assert "e_review" not in ids
+
+
+def test_rebuild_index_updates_registry_index_status(tmp_path):
+    from mlagent_memory.io import read_yaml
+    from mlagent_memory.knowledge import import_knowledge_file
+    from mlagent_memory.index import rebuild_index
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    src = tmp_path / "n.md"
+    src.write_text("# AUC\nleakage prevention", encoding="utf-8")
+    item = import_knowledge_file(root, src, item_type="method_note", tags=[])
+    assert read_yaml(root / "project_knowledge/registry.yaml")["items"][0]["index_status"] == "pending"
+    rebuild_index(root)
+    assert read_yaml(root / "project_knowledge/registry.yaml")["items"][0]["index_status"] == "indexed"
