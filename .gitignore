@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Build / packaging artifacts
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Test / type cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local project memory (created by `mlagent-memory init`)
+/project_memory/
