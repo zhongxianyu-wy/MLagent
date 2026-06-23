@@ -110,3 +110,20 @@ def test_knowledge_search_back_compat_indexes_direct_note(tmp_path):
     rebuild_index(root)
     hits = search_index(root, "attention", asset_type="knowledge")
     assert len(hits) == 1
+
+
+def test_knowledge_search_matches_header_keyword(tmp_path):
+    """A keyword that appears only in a markdown header must still be searchable,
+    because section headers are prepended to chunk content on import."""
+    from mlagent_memory.knowledge import import_knowledge_file
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    src = tmp_path / "doc.md"
+    src.write_text("# Target Leakage Prevention\n\nbody text without the keyword\n", encoding="utf-8")
+    import_knowledge_file(root, src, item_type="paper", tags=[])
+    rebuild_index(root)
+    hits = search_index(root, "leakage", asset_type="knowledge")
+    assert hits, "header keyword 'leakage' should be searchable"
+

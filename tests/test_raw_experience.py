@@ -67,3 +67,24 @@ def test_add_experience_rejects_duplicate_unless_replace(tmp_path):
         add_experience(root, payload)
     add_experience(root, {**payload, "summary": "s2"}, replace=True)
     assert read_yaml(root / "experience/lessons/e1.yaml")["summary"] == "s2"
+
+
+def test_add_raw_from_yaml_with_unquoted_timestamp(tmp_path):
+    # PyYAML auto-parses bare ISO timestamps to datetime; read_yaml must keep them as str
+    # so the record schema (created_at: str) accepts a user-authored YAML record.
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    record_file = tmp_path / "run.yaml"
+    record_file.write_text(
+        "id: raw_ts\n"
+        "type: run\n"
+        "created_at: 2026-06-23T10:00:00+08:00\n"
+        "session_id: s1\n"
+        "goal: g\n",
+        encoding="utf-8",
+    )
+    data = read_yaml(record_file)
+    assert isinstance(data["created_at"], str)
+    record = add_raw_memory(root, data)
+    assert record.created_at == "2026-06-23T10:00:00+08:00"
+

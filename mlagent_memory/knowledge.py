@@ -33,7 +33,16 @@ def _split_text(path: Path, text: str) -> list[str]:
     if path.suffix.lower() in {".md", ".markdown"}:
         splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("#", "h1"), ("##", "h2"), ("###", "h3")])
         documents = splitter.split_text(text)
-        return [doc.page_content for doc in documents if doc.page_content.strip()]
+        chunks: list[str] = []
+        for doc in documents:
+            body = doc.page_content.strip()
+            if not body:
+                continue
+            # Prepend the section header path so title keywords are searchable in FTS.
+            headers = doc.metadata or {}
+            header_line = " ".join(str(headers[k]) for k in ("h1", "h2", "h3") if headers.get(k))
+            chunks.append(f"{header_line}\n\n{body}" if header_line else body)
+        return chunks
     splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=120)
     return [chunk for chunk in splitter.split_text(text) if chunk.strip()]
 
