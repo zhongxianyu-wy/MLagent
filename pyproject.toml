@@ -22,6 +22,9 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 mlagent-memory = "mlagent_memory.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["mlagent_memory*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
