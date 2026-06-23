@@ -78,7 +78,12 @@ def rebuild_index(root: Path) -> None:
 
 def search_index(root: Path, query: str, asset_type: str | None = None, limit: int = 10) -> list[dict[str, str]]:
     require_memory_repo(root)
-    db = Database(_index_path(root))
+    index_path = _index_path(root)
+    if not index_path.exists():
+        return []
+    db = Database(index_path)
+    if not db["documents"].exists() or not db["documents"].detect_fts():
+        return []
     where = "asset_type = :asset_type" if asset_type else None
     where_args = {"asset_type": asset_type} if asset_type else None
     rows = db["documents"].search(query, where=where, where_args=where_args, limit=limit)

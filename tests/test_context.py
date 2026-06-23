@@ -45,3 +45,17 @@ def test_retraining_pack_requires_skill_version(tmp_path):
         assert "SkillVersion not found" in str(exc)
     else:
         raise AssertionError("Expected missing SkillVersion failure")
+
+
+def test_exploration_pack_on_fresh_repo_without_index(tmp_path):
+    from mlagent_memory.context import create_context_pack
+    from mlagent_memory.repo import init_memory_repo
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    pack = create_context_pack(root, pack_type="exploration", prompt="Improve AUC")
+    names = [s["name"] for s in pack.sections]
+    assert names[:5] == ["current_prompt", "data_understanding", "experience", "project_knowledge", "skill_versions"]
+    # experience and project_knowledge came from search_index on a missing index -> empty
+    assert pack.sections[2]["content"] == []
+    assert pack.sections[3]["content"] == []
+    assert pack.sections[4]["content"] == []   # empty SkillVersion registry
