@@ -51,3 +51,13 @@ def test_bin_wrapper_version():
     )
     assert result.returncode == 0, f"stderr:\n{result.stderr}"
     assert "mlagent-memory 0.1.0" in result.stdout
+
+
+def test_bin_wrapper_runs_via_real_shebang():
+    """Execute bin/mlagent-memory via its shebang (the real deployed invocation).
+
+    In this worktree the wrapper re-execs into .venv/bin/python, so deps resolve.
+    """
+    proc = subprocess.run([str(BIN_PATH.resolve()), "version"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "mlagent-memory 0.1.0" in proc.stdout
