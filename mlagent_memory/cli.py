@@ -28,9 +28,10 @@ def init(
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
     project_name: str = typer.Option(..., "--project-name"),
     primary_metric: str = typer.Option("auc", "--primary-metric"),
+    force: bool = typer.Option(False, "--force"),
 ) -> None:
     """Create a project memory repo."""
-    init_memory_repo(memory_root, project_name=project_name, primary_metric=primary_metric)
+    init_memory_repo(memory_root, project_name=project_name, primary_metric=primary_metric, force=force)
     typer.echo(f"Initialized project memory repo: {memory_root}")
 
 
@@ -85,9 +86,10 @@ def import_knowledge(
 def add_raw(
     record_path: Path = typer.Argument(...),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
     """Add a raw memory YAML record."""
-    record = add_raw_memory(memory_root, read_yaml(record_path))
+    record = add_raw_memory(memory_root, read_yaml(record_path), replace=replace)
     typer.echo(f"Added raw memory: {record.id}")
 
 
@@ -95,9 +97,10 @@ def add_raw(
 def add_experience_command(
     record_path: Path = typer.Argument(...),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
     """Add an experience YAML record."""
-    record = add_experience(memory_root, read_yaml(record_path))
+    record = add_experience(memory_root, read_yaml(record_path), replace=replace)
     typer.echo(f"Added experience: {record.id}")
 
 
@@ -110,7 +113,7 @@ def create_context_pack_command(
 ) -> None:
     """Create a task-specific Context Pack."""
     pack = create_context_pack(memory_root, pack_type=pack_type, prompt=prompt, skill_version=skill_version)
-    typer.echo(json.dumps(pack.model_dump(), indent=2, ensure_ascii=True))
+    typer.echo(json.dumps(pack.model_dump(), indent=2, ensure_ascii=False))
 
 
 @app.command("create-skill-candidate")
@@ -133,10 +136,11 @@ def approve_skill_command(
     approval_note: str = typer.Option(..., "--approval-note"),
     performance_path: Path = typer.Option(..., "--performance-path"),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
 ) -> None:
     """Approve a SkillVersion candidate after human performance review."""
     try:
-        approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path)
+        approved = approve_skill_candidate(memory_root, version, reviewer, approval_note, performance_path, replace=replace)
     except MlagentError as exc:
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
@@ -172,7 +176,7 @@ def get_skill_command(
     except MlagentError as exc:
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
-    typer.echo(json.dumps(bundle, indent=2, ensure_ascii=True))
+    typer.echo(json.dumps(bundle, indent=2, ensure_ascii=False))
 
 
 def main() -> None:

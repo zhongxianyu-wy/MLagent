@@ -12,3 +12,11 @@ class InvalidSkillPerformance(MlagentError):
 
 class SkillVersionNotFound(MlagentError):
     """Raised when a requested SkillVersion or candidate cannot be found."""
+
+
+class RecordExists(MlagentError):
+    """Raised when writing a record whose id already exists without explicit replace."""
+
+
+class SkillVersionAlreadyExists(MlagentError):
+    """Raised when approving a SkillVersion whose approved version already exists without explicit replace."""

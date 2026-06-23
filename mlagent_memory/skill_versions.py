@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from shutil import copytree, rmtree
+from shutil import copytree, move, rmtree
 from typing import Any
 
 from pydantic import ValidationError
 
-from mlagent_memory.errors import InvalidSkillPerformance, SkillVersionNotFound
+from mlagent_memory.errors import InvalidSkillPerformance, SkillVersionAlreadyExists, SkillVersionNotFound
 from mlagent_memory.io import read_text, read_yaml, write_text, write_yaml
 from mlagent_memory.repo import require_memory_repo
 from mlagent_memory.schemas import Performance, SkillVersion
@@ -58,6 +58,7 @@ def approve_skill_candidate(
     reviewer: str,
     approval_note: str,
     performance_path: Path,
+    replace: bool = False,
 ) -> SkillVersion:
     require_memory_repo(root)
     candidate_dir = root / "skill_versions/.candidates" / version
@@ -84,7 +85,15 @@ def approve_skill_candidate(
     approved = SkillVersion(**data)
 
     if approved_dir.exists():
-        rmtree(approved_dir)
+        if not replace:
+            raise SkillVersionAlreadyExists(
+                f"Approved SkillVersion already exists: {version} "
+                "(pass replace=True to archive the old version and replace it)"
+            )
+        archive_dir = root / "skill_versions" / ".archive" / f"{version}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        archive_dir.parent.mkdir(parents=True, exist_ok=True)
+        rmtree(archive_dir) if archive_dir.exists() else None
+        move(str(approved_dir), str(archive_dir))
     copytree(candidate_dir, approved_dir)
     write_yaml(approved_dir / "skill.yaml", approved.model_dump(exclude_none=True))
     write_yaml(approved_dir / "performance.yaml", validated_performance.model_dump())

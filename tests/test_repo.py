@@ -41,3 +41,27 @@ def test_memory_status_counts_assets(tmp_path):
     assert status["raw_memory_count"] == 0
     assert status["experience_count"] == 0
     assert status["skill_version_count"] == 0
+
+
+from mlagent_memory.io import write_yaml
+
+
+def test_init_does_not_overwrite_existing_assets(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    write_yaml(root / "project_knowledge/registry.yaml", {"items": [{"id": "keep"}]})
+    write_yaml(root / "skill_versions/registry.yaml", {"versions": [{"version": "vkeep"}]})
+    # second init without force must preserve existing assets
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    from mlagent_memory.io import read_yaml
+    assert read_yaml(root / "project_knowledge/registry.yaml")["items"] == [{"id": "keep"}]
+    assert read_yaml(root / "skill_versions/registry.yaml")["versions"] == [{"version": "vkeep"}]
+
+
+def test_init_force_overwrites_seed_files(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    write_yaml(root / "project_knowledge/registry.yaml", {"items": [{"id": "keep"}]})
+    init_memory_repo(root, project_name="demo", primary_metric="auc", force=True)
+    from mlagent_memory.io import read_yaml
+    assert read_yaml(root / "project_knowledge/registry.yaml")["items"] == []

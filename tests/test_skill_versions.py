@@ -68,7 +68,7 @@ def test_approve_skill_candidate_requires_performance(tmp_path):
 
 import pytest
 
-from mlagent_memory.errors import InvalidSkillPerformance, SkillVersionNotFound
+from mlagent_memory.errors import InvalidSkillPerformance, SkillVersionAlreadyExists, SkillVersionNotFound
 from mlagent_memory.skill_versions import get_skill, list_skills
 
 
@@ -165,3 +165,20 @@ def test_get_skill_approved_and_candidate_and_missing(tmp_path):
     # missing
     with pytest.raises(SkillVersionNotFound):
         get_skill(root, "nope")
+
+
+def test_approve_rejects_duplicate_unless_replace(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    create_skill_candidate(root, version="v1", name="b", source_type="best_run", source_evidence=["r"])
+    perf = tmp_path / "p.yaml"
+    write_yaml(perf, {"primary_metric": {"name": "auc", "value": 0.91}, "dataset_version": "d1", "validation_protocol": "holdout"})
+    approve_skill_candidate(root, version="v1", reviewer="h1", approval_note="first", performance_path=perf)
+    with pytest.raises(SkillVersionAlreadyExists):
+        approve_skill_candidate(root, version="v1", reviewer="h2", approval_note="second", performance_path=perf)
+    # replace archives the old and approves the new
+    approve_skill_candidate(root, version="v1", reviewer="h2", approval_note="second", performance_path=perf, replace=True)
+    from mlagent_memory.io import read_yaml
+    assert read_yaml(root / "skill_versions/v1/skill.yaml")["human_review"]["reviewer"] == "h2"
+    archives = list((root / "skill_versions/.archive").glob("v1_*"))
+    assert len(archives) == 1
