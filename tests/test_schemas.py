@@ -52,3 +52,38 @@ def test_yaml_round_trip_and_hash(tmp_path):
     write_yaml(path, {"id": "abc", "items": [1, 2]})
     assert read_yaml(path) == {"id": "abc", "items": [1, 2]}
     assert len(sha256_file(path)) == 64
+
+
+import math
+
+import pytest
+from pydantic import ValidationError
+
+from mlagent_memory.schemas import BenchmarkMetric, Performance, PrimaryMetric
+
+
+def test_performance_rejects_empty_strings():
+    with pytest.raises(ValidationError):
+        Performance(primary_metric={"name": "", "value": 0.9}, dataset_version="d1", validation_protocol="holdout")
+    with pytest.raises(ValidationError):
+        Performance(primary_metric={"name": "auc", "value": 0.9}, dataset_version="", validation_protocol="holdout")
+    with pytest.raises(ValidationError):
+        Performance(primary_metric={"name": "auc", "value": 0.9}, dataset_version="d1", validation_protocol="")
+
+
+def test_performance_rejects_non_finite_values():
+    for bad in [float("nan"), float("inf"), float("-inf")]:
+        with pytest.raises(ValidationError):
+            PrimaryMetric(name="auc", value=bad)
+        with pytest.raises(ValidationError):
+            BenchmarkMetric(name="base", value=bad)
+
+
+def test_performance_accepts_valid_complete_data():
+    p = Performance(
+        primary_metric={"name": "auc", "value": 0.91},
+        dataset_version="data_v001",
+        validation_protocol="holdout",
+        benchmark_metric={"name": "baseline_auc", "value": 0.86},
+    )
+    assert p.primary_metric.value == 0.91

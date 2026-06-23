@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProjectProfile(BaseModel):
@@ -104,18 +105,32 @@ class ContextPack(BaseModel):
 
 
 class PrimaryMetric(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     value: float
+
+    @field_validator("value")
+    @classmethod
+    def _value_must_be_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("metric value must be finite (not NaN or inf)")
+        return v
 
 
 class BenchmarkMetric(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     value: float
+
+    @field_validator("value")
+    @classmethod
+    def _value_must_be_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("metric value must be finite (not NaN or inf)")
+        return v
 
 
 class Performance(BaseModel):
     primary_metric: PrimaryMetric
-    dataset_version: str
-    validation_protocol: str
+    dataset_version: str = Field(min_length=1)
+    validation_protocol: str = Field(min_length=1)
     benchmark_metric: BenchmarkMetric | None = None
     target_or_acceptance_note: str | None = None
