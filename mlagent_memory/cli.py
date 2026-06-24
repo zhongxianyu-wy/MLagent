@@ -10,6 +10,7 @@ from mlagent_memory.experience import add_experience
 from mlagent_memory.index import rebuild_index, search_index
 from mlagent_memory.io import read_yaml
 from mlagent_memory.knowledge import import_knowledge_file
+from mlagent_memory.overview import write_experience_overview
 from mlagent_memory.raw import add_raw_memory
 from mlagent_memory.repo import init_memory_repo, memory_status
 from mlagent_memory.skill_versions import approve_skill_candidate, create_skill_candidate, get_skill, list_skills
@@ -102,6 +103,15 @@ def add_experience_command(
     """Add an experience YAML record."""
     record = add_experience(memory_root, read_yaml(record_path), replace=replace)
     typer.echo(f"Added experience: {record.id}")
+
+
+@app.command("overview-experience")
+def overview_experience_command(
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Render a Chinese Markdown overview of all experience records (human browsing only)."""
+    path = write_experience_overview(memory_root)
+    typer.echo(f"Experience overview written: {path}")
 
 
 @app.command("create-context-pack")
