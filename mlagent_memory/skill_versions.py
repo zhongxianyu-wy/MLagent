@@ -11,10 +11,72 @@ from mlagent_memory.errors import InvalidSkillPerformance, SkillVersionAlreadyEx
 from mlagent_memory.io import read_text, read_yaml, write_text, write_yaml
 from mlagent_memory.repo import require_memory_repo
 from mlagent_memory.schemas import Performance, SkillVersion
+from mlagent_memory.skill_extraction import (
+    analyze_training_logic,
+    parse_source,
+    render_skill_md,
+    resolve_source_evidence,
+)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _source_rel(root: Path, src_path: Path) -> str:
+    try:
+        return str(src_path.resolve().relative_to(Path(root).resolve().parent))
+    except ValueError:
+        return src_path.name
+
+
+def _reproduce_reference(name: str) -> str:
+    return (
+        f"# Reproduce {name}\n\n"
+        "This SkillVersion was generated from a source notebook/script. "
+        "See `SKILL.md` for the extracted feature-selection + training recipe, "
+        "and `references/source.py` for the authoritative runnable source.\n"
+    )
+
+
+def _enrich_candidate_from_source(
+    candidate_dir: Path,
+    root: Path,
+    data: dict[str, Any],
+    version: str,
+    name: str,
+    source_type: str,
+    source_evidence: list[str],
+) -> bool:
+    """Parse the source notebook/script into a skill-creator-format SKILL.md + references.
+    Mutates `data` (artifacts/requirements/reproducibility). Returns False (no-op) if no
+    resolvable source or parsing fails — caller keeps the empty-stub behavior."""
+    src_path = resolve_source_evidence(root, source_evidence)
+    if src_path is None:
+        return False
+    try:
+        parsed = parse_source(src_path)
+        analysis = analyze_training_logic(parsed["code"])
+        skill_md = render_skill_md(version, name, source_type, analysis, _source_rel(root, src_path))
+    except (ValueError, OSError):
+        return False
+    refs = candidate_dir / "references"
+    refs.mkdir(parents=True, exist_ok=True)
+    write_text(candidate_dir / "SKILL.md", skill_md)
+    write_text(refs / "source.py", parsed["code"])
+    write_yaml(refs / "analysis.yaml", analysis)
+    data["artifacts"] = [
+        {"path": "SKILL.md", "kind": "skill_md"},
+        {"path": "references/source.py", "kind": "source"},
+        {"path": "references/analysis.yaml", "kind": "analysis"},
+    ]
+    data["requirements"] = {"python_imports": analysis.get("imports", [])}
+    data["reproducibility"] = {
+        "entrypoint": "references/source.py",
+        "required_inputs": analysis.get("data_inputs", []),
+        "expected_outputs": [str(m.get("name", "")) for m in analysis.get("metrics", [])],
+    }
+    return True
 
 
 def create_skill_candidate(
@@ -59,6 +121,10 @@ def create_skill_candidate(
     write_text(candidate_dir / "constraints.md", "# Constraints\n")
     write_text(candidate_dir / "validation_checklist.md", "# Validation Checklist\n")
     write_yaml(candidate_dir / "source_evidence.yaml", {"source_evidence": source_evidence})
+    if _enrich_candidate_from_source(candidate_dir, root, data, version, name, source_type, source_evidence):
+        candidate = SkillVersion(**data)
+        write_yaml(candidate_dir / "skill.yaml", candidate.model_dump(exclude_none=True))
+        write_text(candidate_dir / "reproduce.md", _reproduce_reference(name))
     return candidate
 
 
@@ -132,6 +198,13 @@ def _read_skill_bundle(directory: Path, version: str, source: str) -> dict[str, 
         path = directory / fname
         if path.exists():
             files[fname] = read_text(path)
+    if (directory / "SKILL.md").exists():
+        files["SKILL.md"] = read_text(directory / "SKILL.md")
+    references = directory / "references"
+    if references.exists():
+        for ref_path in sorted(references.rglob("*")):
+            if ref_path.is_file():
+                files[str(ref_path.relative_to(directory))] = read_text(ref_path)
     return {
         "version": version,
         "source": source,

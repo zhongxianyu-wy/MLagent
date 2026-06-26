@@ -206,3 +206,89 @@ def test_create_skill_candidate_replace_archives_old(tmp_path):
     assert len(archives) == 1
     # new candidate still exists and is usable
     assert (root / "skill_versions/.candidates/v1/skill.yaml").exists()
+
+
+import json
+
+
+def _write_nb(path, code):
+    nb = {
+        "cells": [
+            {"cell_type": "markdown", "source": ["# nb"]},
+            {"cell_type": "code", "source": code.splitlines(keepends=True)},
+        ],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    path.write_text(json.dumps(nb), encoding="utf-8")
+
+
+_NB_CODE = (
+    "import pandas as pd\n"
+    "from sklearn.feature_selection import RFE, SelectKBest, f_classif\n"
+    "from lightgbm import LGBMClassifier\n"
+    "from sklearn.metrics import roc_auc_score\n"
+    'df = pd.read_csv("data/train.csv")\n'
+    "def select_features(X, y):\n"
+    "    skb = SelectKBest(f_classif, k=20)\n"
+    "    rfe = RFE(LGBMClassifier(n_estimators=50), n_features_to_select=10)\n"
+    "    return rfe.fit_transform(skb.fit_transform(X, y), y)\n"
+    "model = LGBMClassifier(n_estimators=200, learning_rate=0.05)\n"
+    "model.fit(X_train, y_train)\n"
+    "auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])\n"
+)
+
+
+def test_create_skill_candidate_parses_ipynb_into_skill(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    nb = tmp_path / "notebooks" / "train.ipynb"
+    nb.parent.mkdir(parents=True)
+    _write_nb(nb, _NB_CODE)
+    candidate = create_skill_candidate(
+        root, version="v001_lgbm", name="lgbm_baseline",
+        source_type="ipynb_import", source_evidence=["notebooks/train.ipynb"],
+    )
+    cdir = root / "skill_versions/.candidates/v001_lgbm"
+    assert (cdir / "SKILL.md").exists()
+    source_py = cdir / "references/source.py"
+    assert source_py.exists() and "RFE" in source_py.read_text(encoding="utf-8")
+    analysis = read_yaml(cdir / "references/analysis.yaml")
+    assert analysis["feature_selection"]
+    skill_yaml = read_yaml(cdir / "skill.yaml")
+    assert len(skill_yaml["artifacts"]) == 3
+    assert all(isinstance(a, dict) and all(isinstance(v, str) for v in a.values()) for a in skill_yaml["artifacts"])
+    assert skill_yaml["reproducibility"]["entrypoint"] == "references/source.py"
+    assert "sklearn" in skill_yaml["requirements"]["python_imports"]
+    assert candidate.state == "pending_review"
+
+
+def test_create_skill_candidate_falls_back_when_source_missing(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    candidate = create_skill_candidate(
+        root, version="v_fallback", name="b",
+        source_type="ipynb_import", source_evidence=["does/not/exist.ipynb"],
+    )
+    cdir = root / "skill_versions/.candidates/v_fallback"
+    assert not (cdir / "SKILL.md").exists()
+    assert not (cdir / "references").exists()
+    assert (cdir / "reproduce.md").exists()
+    assert candidate.artifacts == []
+
+
+def test_get_skill_surfaces_skill_md_and_references(tmp_path):
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    nb = tmp_path / "notebooks" / "train.ipynb"
+    nb.parent.mkdir(parents=True)
+    _write_nb(nb, _NB_CODE)
+    create_skill_candidate(
+        root, version="v_bundle", name="lgbm",
+        source_type="ipynb_import", source_evidence=["notebooks/train.ipynb"],
+    )
+    bundle = get_skill(root, "v_bundle", include_draft=True)
+    assert "SKILL.md" in bundle["files"]
+    assert "references/source.py" in bundle["files"]
+    assert "references/analysis.yaml" in bundle["files"]
