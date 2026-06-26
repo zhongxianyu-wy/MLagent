@@ -146,3 +146,52 @@ def test_search_multi_word_query_uses_or_recall(tmp_path):
     assert hits, "multi-word query should OR-match on a shared token ('overfits')"
 
 
+def test_generated_artifacts_are_not_indexed(tmp_path):
+    """SKILL.md / references/ / snapshot.json are display-only; generating them must not change
+    search results or appear as hits (the index only globs experience/**/*.yaml + notes/*.md)."""
+    import json
+
+    from mlagent_memory.experience import add_experience
+    from mlagent_memory.export import export_memory_snapshot
+    from mlagent_memory.index import rebuild_index, search_index
+    from mlagent_memory.io import write_text
+    from mlagent_memory.repo import init_memory_repo
+    from mlagent_memory.skill_versions import create_skill_candidate
+
+    root = tmp_path / "project_memory"
+    init_memory_repo(root, project_name="demo", primary_metric="auc")
+    add_experience(
+        root,
+        {
+            "id": "e1", "type": "pitfall", "summary": "feature leakage pitfall", "detail": "d",
+            "confidence": "high", "needs_review": False, "source_raw_records": ["r"],
+            "created_at": "2026-06-26T10:00:00+08:00",
+        },
+    )
+    nb = tmp_path / "notebooks" / "train.ipynb"
+    nb.parent.mkdir(parents=True)
+    nb.write_text(json.dumps({
+        "cells": [{"cell_type": "code", "source": "from sklearn.feature_selection import RFE\n".splitlines(keepends=True)}],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 5,
+    }), encoding="utf-8")
+    rebuild_index(root)
+    before = search_index(root, "feature", asset_type="experience")
+
+    # generate the display-only artifacts
+    create_skill_candidate(root, version="v1", name="b", source_type="ipynb_import", source_evidence=["notebooks/train.ipynb"])
+    (root / "snapshot.json").write_text(json.dumps(export_memory_snapshot(root)), encoding="utf-8")
+    assert (root / "skill_versions/.candidates/v1/SKILL.md").exists()
+    assert (root / "snapshot.json").exists()
+    rebuild_index(root)
+    after = search_index(root, "feature", asset_type="experience")
+
+    assert len(before) == len(after) == 1
+    # none of the generated artifacts appear as hits under any asset_type
+    broad = search_index(root, "feature") + search_index(root, "RFE")
+    for hit in broad:
+        path = hit.get("source_path", "")
+        assert "SKILL.md" not in path and "references/" not in path and "snapshot.json" not in path
+        assert hit.get("asset_type") in {"experience", "knowledge"}
+
+
+

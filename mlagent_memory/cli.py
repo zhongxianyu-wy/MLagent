@@ -7,6 +7,7 @@ from mlagent_memory import __version__
 from mlagent_memory.context import create_context_pack
 from mlagent_memory.errors import MemoryRepoNotFound, MlagentError
 from mlagent_memory.experience import add_experience
+from mlagent_memory.export import export_memory_snapshot
 from mlagent_memory.index import rebuild_index, search_index
 from mlagent_memory.io import read_yaml
 from mlagent_memory.knowledge import import_knowledge_file
@@ -112,6 +113,24 @@ def overview_experience_command(
     """Render a Chinese Markdown overview of all experience records (human browsing only)."""
     path = write_experience_overview(memory_root)
     typer.echo(f"Experience overview written: {path}")
+
+
+@app.command("export")
+def export_command(
+    output: Path | None = typer.Option(None, "--output"),
+    stdout: bool = typer.Option(False, "--stdout"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Export a read-only JSON snapshot of the memory repo for frontend visualization."""
+    snapshot = export_memory_snapshot(memory_root)
+    payload = json.dumps(snapshot, indent=2, ensure_ascii=False, default=str)
+    if stdout:
+        typer.echo(payload)
+        return
+    out_path = output or (memory_root / "snapshot.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(payload, encoding="utf-8")
+    typer.echo(f"Snapshot written: {out_path}")
 
 
 @app.command("create-context-pack")
