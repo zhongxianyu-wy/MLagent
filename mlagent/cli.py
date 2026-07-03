@@ -11,6 +11,7 @@ from pathlib import Path
 import typer
 
 from mlagent import __version__
+from mlagent.context import assemble_context
 from mlagent.distill import apply_distill_plan
 from mlagent.errors import MlagentError
 from mlagent.experience import add_experience
@@ -231,6 +232,21 @@ def pull_command(
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
     typer.echo(f"Pulled: {memory_root.parent}")
+
+
+@app.command("assemble-context")
+def assemble_context_command(
+    prompt: str = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Assemble exploration context (experience injection for explore-train)."""
+    import json
+    try:
+        pack = assemble_context(memory_root, prompt)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(json.dumps(pack, indent=2, ensure_ascii=False, default=str))
 
 
 def main() -> None:
