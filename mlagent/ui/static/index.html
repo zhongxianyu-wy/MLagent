@@ -7,29 +7,40 @@
     <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f1117; color: #d4d4d4; }
-        .header { background: #1a1a2e; padding: 1rem 2rem; border-bottom: 1px solid #2a2a4e; }
-        .header h1 { margin: 0; font-size: 1.3rem; color: #e94560; }
-        .tabs { display: flex; gap: 0; background: #1a1a2e; padding: 0 2rem; border-bottom: 1px solid #2a2a4e; }
-        .tab { padding: 0.6rem 1.2rem; cursor: pointer; border-bottom: 2px solid transparent; color: #888; }
-        .tab.active { color: #e94560; border-bottom-color: #e94560; }
+        body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; background: #f5f7fa; color: #1e293b; }
+        .header { background: #ffffff; padding: 1rem 2rem; border-bottom: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        .header h1 { margin: 0; font-size: 1.3rem; color: #2563eb; }
+        .tabs { display: flex; gap: 0; background: #ffffff; padding: 0 2rem; border-bottom: 1px solid #e2e8f0; }
+        .tab { padding: 0.6rem 1.2rem; cursor: pointer; border-bottom: 2px solid transparent; color: #64748b; transition: all 0.15s; }
+        .tab:hover { color: #2563eb; }
+        .tab.active { color: #2563eb; border-bottom-color: #2563eb; font-weight: 600; }
         .content { padding: 1.5rem 2rem; }
-        .card { background: #1a1a2e; border-radius: 8px; padding: 1rem; margin: 0.6rem 0; border: 1px solid #2a2a4e; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 0.4rem; }
-        .badge.high { background: #2ecc71; color: #000; }
-        .badge.medium { background: #f39c12; color: #000; }
-        .badge.low { background: #e74c3c; color: #fff; }
-        .badge.verified { background: #3498db; color: #fff; }
+        .card { background: #ffffff; border-radius: 8px; padding: 1rem; margin: 0.6rem 0; border: 1px solid #e2e8f0; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 0.4rem; font-weight: 500; }
+        .badge.high { background: #dcfce7; color: #166534; }
+        .badge.medium { background: #fef3c7; color: #92400e; }
+        .badge.low { background: #fee2e2; color: #991b1b; }
+        .badge.verified { background: #dbeafe; color: #1e40af; }
+        .badge.confirmed { background: #dcfce7; color: #166534; }
+        .badge.refuted { background: #fee2e2; color: #991b1b; }
+        .badge.inconclusive { background: #fef3c7; color: #92400e; }
         .sub-tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-        .sub-tab { padding: 0.3rem 0.8rem; border-radius: 4px; background: #1a1a2e; cursor: pointer; font-size: 0.85rem; }
-        .sub-tab.active { background: #e94560; color: #fff; }
+        .sub-tab { padding: 0.3rem 0.8rem; border-radius: 4px; background: #f1f5f9; cursor: pointer; font-size: 0.85rem; color: #475569; border: 1px solid #e2e8f0; transition: all 0.15s; }
+        .sub-tab:hover { background: #e2e8f0; }
+        .sub-tab.active { background: #2563eb; color: #ffffff; border-color: #2563eb; }
         .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
         .stat { text-align: center; }
-        .stat .num { font-size: 1.8rem; font-weight: bold; color: #e94560; }
-        .stat .label { font-size: 0.8rem; color: #888; }
-        input[type="text"] { background: #1a1a2e; border: 1px solid #2a2a4e; color: #d4d4d4; padding: 0.4rem 0.8rem; border-radius: 4px; width: 100%; }
-        .placeholder { text-align: center; padding: 3rem; color: #555; }
-        code { background: #111; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+        .stat .num { font-size: 1.8rem; font-weight: bold; color: #2563eb; }
+        .stat .label { font-size: 0.8rem; color: #64748b; margin-top: 0.2rem; }
+        input[type="text"] { background: #ffffff; border: 1px solid #cbd5e1; color: #1e293b; padding: 0.5rem 0.8rem; border-radius: 6px; width: 100%; font-size: 0.9rem; }
+        input[type="text"]:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.1); }
+        .btn { padding: 0.5rem 1.2rem; background: #2563eb; color: #ffffff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; transition: background 0.15s; }
+        .btn:hover { background: #1d4ed8; }
+        .placeholder { text-align: center; padding: 3rem; color: #94a3b8; }
+        code { background: #f1f5f9; color: #334155; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+        pre { background: #f8fafc; border: 1px solid #e2e8f0; color: #1e293b; border-radius: 8px; padding: 1rem; overflow: auto; font-size: 0.82rem; line-height: 1.5; max-height: 70vh; white-space: pre-wrap; word-break: break-all; }
+        .section-title { font-size: 0.9rem; color: #64748b; margin: 0 0 0.5rem; font-weight: 600; }
+        .meta { font-size: 0.8rem; color: #64748b; }
     </style>
 </head>
 <body x-data="mlagent()" x-init="init()">
@@ -45,34 +56,34 @@
 
 <!-- F1: 实时代码审核 -->
 <div class="content" x-show="tab==='f1'">
-    <div style="margin-bottom:1rem">
+    <div style="margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">
         <input type="text" x-model="script_path" @keyup.enter="fetch_script()" placeholder="脚本路径（如 train.py）" style="width:300px">
-        <button @click="fetch_script()" style="margin-left:0.5rem;padding:0.4rem 1rem;background:#e94560;color:#fff;border:none;border-radius:4px;cursor:pointer">加载</button>
-        <span style="margin-left:0.5rem;font-size:0.8rem;color:#555">每 3 秒自动刷新</span>
+        <button class="btn" @click="fetch_script()">加载</button>
+        <span class="meta">每 3 秒自动刷新</span>
     </div>
     <div style="display:flex;gap:1rem">
-        <div style="width:250px;flex-shrink:0" x-show="script_data.manifest && script_data.manifest.steps && script_data.manifest.steps.length">
-            <h3 style="font-size:0.9rem;color:#888;margin:0 0 0.5rem">📋 结构化步骤</h3>
+        <div style="width:260px;flex-shrink:0" x-show="script_data.manifest && script_data.manifest.steps && script_data.manifest.steps.length">
+            <div class="section-title">📋 结构化步骤</div>
             <template x-for="(step, i) in (script_data.manifest?.steps || [])" :key="i">
-                <div class="card" style="padding:0.6rem">
+                <div class="card" style="padding:0.7rem">
                     <strong x-text="step.title || step.id"></strong>
-                    <p style="font-size:0.8rem;color:#888;margin:0.2rem 0" x-text="step.purpose || ''"></p>
+                    <p class="meta" style="margin:0.2rem 0" x-text="step.purpose || ''"></p>
                     <div x-show="step.key_params">
                         <template x-for="(v,k) in (step.key_params || {})" :key="k">
-                            <code style="font-size:0.75rem;margin-right:0.3rem" x-text="k+'='+v"></code>
+                            <code style="margin-right:0.3rem" x-text="k+'='+v"></code>
                         </template>
                     </div>
                 </div>
             </template>
         </div>
         <div style="flex:1;min-width:0">
-            <h3 style="font-size:0.9rem;color:#888;margin:0 0 0.5rem" x-show="script_data.code">📄 代码</h3>
-            <pre style="background:#0d1117;border:1px solid #2a2a4e;border-radius:8px;padding:1rem;overflow:auto;font-size:0.82rem;line-height:1.5;max-height:70vh;white-space:pre-wrap;word-break:break-all" x-text="script_data.code" x-show="script_data.code"></pre>
+            <div class="section-title" x-show="script_data.code">📄 代码</div>
+            <pre x-text="script_data.code" x-show="script_data.code"></pre>
         </div>
     </div>
     <div class="placeholder" x-show="!script_data.code">
         <p>输入脚本路径并点"加载"查看结构化代码视图</p>
-        <p style="font-size:0.8rem;color:#444">若脚本有 <code>.manifest.yaml</code>，左侧显示语义步骤（特征处理/划分/模型/训练/评估）</p>
+        <p style="font-size:0.8rem">若脚本有 <code>.manifest.yaml</code>，左侧显示语义步骤（特征处理 / 划分 / 模型 / 训练 / 评估）</p>
     </div>
 </div>
 
@@ -86,7 +97,7 @@
             <div class="stat"><div class="num" x-text="status.experience_count ?? 0"></div><div class="label">经验</div></div>
             <div class="stat"><div class="num" x-text="status.skill_version_count ?? 0"></div><div class="label">SOP 版本</div></div>
         </div>
-        <p style="text-align:center;margin-top:0.5rem;color:#888;font-size:0.85rem">
+        <p style="text-align:center;margin-top:0.5rem" class="meta">
             项目: <span x-text="status.project_name || '—'"></span> · 主指标: <span x-text="status.primary_metric || '—'"></span>
         </p>
     </div>
@@ -105,7 +116,7 @@
             <div class="card">
                 <strong x-text="s.name + ' / ' + s.version"></strong>
                 <span class="badge verified">已批准</span>
-                <p x-show="s.reviewer" style="color:#888;font-size:0.8rem">审批人: <span x-text="s.reviewer"></span></p>
+                <p class="meta" x-show="s.reviewer">审批人: <span x-text="s.reviewer"></span></p>
             </div>
         </template>
         <template x-for="s in sops.candidates" :key="s.version">
@@ -122,7 +133,7 @@
             <div class="card">
                 <span class="badge" :class="e.confidence" x-text="e.confidence"></span>
                 <strong x-text="e.type"></strong>: <span x-text="e.summary"></span>
-                <div x-show="e.applies_when && e.applies_when.length" style="font-size:0.8rem;color:#888;margin-top:0.3rem">
+                <div class="meta" x-show="e.applies_when && e.applies_when.length" style="margin-top:0.3rem">
                     适用: <span x-text="e.applies_when.join('；')"></span>
                 </div>
             </div>
@@ -135,12 +146,12 @@
         <template x-for="r in runs" :key="r.id">
             <div class="card">
                 <strong x-text="r.goal || r.id"></strong>
-                <span style="float:right;font-size:0.8rem;color:#888" x-text="r.created_at"></span>
+                <span style="float:right" class="meta" x-text="r.created_at"></span>
                 <div x-show="r.conclusion" style="margin-top:0.3rem">
-                    <span class="badge" :class="r.conclusion.outcome==='confirmed' ? 'high' : (r.conclusion.outcome==='refuted' ? 'low' : 'medium')" x-text="r.conclusion.outcome"></span>
+                    <span class="badge" :class="r.conclusion.outcome" x-text="r.conclusion.outcome"></span>
                     <span x-text="r.conclusion.summary"></span>
                 </div>
-                <div x-show="r.results && Object.keys(r.results).length" style="font-size:0.8rem;color:#888;margin-top:0.3rem">
+                <div class="meta" x-show="r.results && Object.keys(r.results).length" style="margin-top:0.3rem">
                     <template x-for="(v,k) in r.results" :key="k">
                         <code x-text="k + ': ' + v"></code>
                     </template>
@@ -155,9 +166,9 @@
         <input type="text" placeholder="搜索关键词（如: leakage, feature selection, AUC）" @keyup.enter="do_search()" x-model="search_q">
         <template x-for="m in search_results" :key="m.id">
             <div class="card">
-                <span class="badge" x-text="m.kind"></span>
+                <span class="badge verified" x-text="m.kind"></span>
                 <strong x-text="m.id"></strong>: <span x-text="m.summary"></span>
-                <div style="font-size:0.8rem;color:#888" x-text="m.path"></div>
+                <div class="meta" x-text="m.path"></div>
             </div>
         </template>
         <div class="placeholder" x-show="search_results.length===0 && search_q">无匹配结果</div>
