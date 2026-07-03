@@ -18,6 +18,7 @@ from mlagent.io import read_yaml
 from mlagent.raw import add_raw_memory
 from mlagent.repo import init_memory_repo, memory_status
 from mlagent.sop import approve_sop, create_candidate, get_sop, list_sops, set_gate_result
+from mlagent.sync import sync_pull, sync_push
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -183,6 +184,53 @@ def get_sop_command(
     except MlagentError as exc:
         typer.echo(str(exc)); raise typer.Exit(2) from exc
     typer.echo(json.dumps({k: v for k, v in bundle.items() if k != "files"}, indent=2, ensure_ascii=False, default=str))
+
+
+@app.command("retrain")
+def retrain_command(
+    sop_name: str = typer.Argument(...),
+    version: str = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Load an approved SOP version for strict retraining (reads directly, no skill-router)."""
+    import json
+    try:
+        bundle = get_sop(memory_root, sop_name, version)  # approved only (no include_draft)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    sop = bundle["sop"]
+    typer.echo(f"Retraining from: {sop_name}/{version} (approved, immutable)")
+    typer.echo(f"Background: {sop.get('background', '')}")
+    typer.echo(f"Key params: {json.dumps(sop.get('key_params', {}), default=str)}")
+    typer.echo(f"Key optimizations: {', '.join(sop.get('key_optimizations', []))}")
+    typer.echo(f"Performance baseline: {json.dumps(sop.get('performance', {}), default=str)}")
+
+
+@app.command("sync")
+def sync_command(
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """One-click commit + push (git sync to remote)."""
+    try:
+        sync_push(memory_root.parent)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(f"Synced (push): {memory_root.parent}")
+
+
+@app.command("pull")
+def pull_command(
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Pull from remote (git pull --ff-only, at boot)."""
+    try:
+        sync_pull(memory_root.parent)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(f"Pulled: {memory_root.parent}")
 
 
 def main() -> None:
