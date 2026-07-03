@@ -12,6 +12,9 @@ import typer
 
 from mlagent import __version__
 from mlagent.errors import MlagentError
+from mlagent.experience import add_experience
+from mlagent.io import read_yaml
+from mlagent.raw import add_raw_memory
 from mlagent.repo import init_memory_repo, memory_status
 
 app = typer.Typer(no_args_is_help=True)
@@ -53,6 +56,36 @@ def status(memory_root: Path = typer.Option(Path("project_memory"), "--memory-ro
     typer.echo(f"Raw memory records: {data['raw_memory_count']}")
     typer.echo(f"Experience records: {data['experience_count']}")
     typer.echo(f"Skill versions: {data['skill_version_count']}")
+
+
+@app.command("record-raw")
+def record_raw(
+    record_path: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
+) -> None:
+    """Add a raw memory YAML record (evidence + conclusion)."""
+    try:
+        record = add_raw_memory(memory_root, read_yaml(record_path), replace=replace)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(f"Recorded raw memory: {record.id}")
+
+
+@app.command("add-experience")
+def add_experience_command(
+    record_path: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    replace: bool = typer.Option(False, "--replace"),
+) -> None:
+    """Add an experience YAML record (lesson/pitfall/pattern/direction/convention)."""
+    try:
+        record = add_experience(memory_root, read_yaml(record_path), replace=replace)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    typer.echo(f"Added experience: {record.id}")
 
 
 def main() -> None:

@@ -11,3 +11,7 @@ class MlagentError(Exception):
 
 class MemoryRepoNotFound(MlagentError):
     """Raised when a command needs an initialized project memory repo."""
+
+
+class RecordExists(MlagentError):
+    """Raised when writing a record whose id already exists without explicit replace."""
