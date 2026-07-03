@@ -11,6 +11,7 @@ from pathlib import Path
 import typer
 
 from mlagent import __version__
+from mlagent.distill import apply_distill_plan
 from mlagent.errors import MlagentError
 from mlagent.experience import add_experience
 from mlagent.io import read_yaml
@@ -86,6 +87,22 @@ def add_experience_command(
         typer.echo(str(exc))
         raise typer.Exit(2) from exc
     typer.echo(f"Added experience: {record.id}")
+
+
+@app.command("distill")
+def distill_command(
+    plan: Path = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Apply a distill plan (produced by the distill-experience skill)."""
+    try:
+        ops = read_yaml(plan).get("ops", [])
+        summary = apply_distill_plan(memory_root, ops)
+    except MlagentError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(2) from exc
+    parts = [f"{k}={v}" for k, v in summary.items() if v]
+    typer.echo(f"Distill applied: {', '.join(parts) or 'no changes'}")
 
 
 def main() -> None:
