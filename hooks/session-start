@@ -1,10 +1,42 @@
 #!/usr/bin/env python3
-# T1 skeleton. T10 will wire: git pull (sync) + bootstrap context inject + UI start (degrade to terminal if UI absent).
+"""SessionStart: inject bootstrap + try git pull + memory status."""
 import sys
+import subprocess
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from mlagent.hooks import hook_output
+from mlagent.hooks import read_hook_input, hook_output
 
-hook_output("SessionStart", "mlagent v0.3 loaded. (skeleton — wiring lands in T10.)")
+data = read_hook_input()
+cwd = Path(data.get("cwd", "."))
+pm = cwd / "project_memory"
+_bin = str(_PLUGIN_ROOT / "bin" / "mlagent")
+parts = []
+
+# try git pull (sync from remote at boot)
+if pm.exists():
+    try:
+        subprocess.run([_bin, "pull", "--memory-root", str(pm)], capture_output=True, text=True, timeout=30)
+        parts.append("Memory synced from remote.")
+    except Exception:
+        parts.append("Pull skipped (non-blocking).")
+
+# inject bootstrap skill (the workflow framing)
+bs = _PLUGIN_ROOT / "skills" / "bootstrap" / "SKILL.md"
+if bs.exists():
+    parts.append(bs.read_text(encoding="utf-8")[:8000])
+else:
+    parts.append("MLagent v0.3 loaded.")
+
+# memory status (if initialized)
+if (pm / "project_profile" / "project.yaml").exists():
+    try:
+        r = subprocess.run([_bin, "status", "--memory-root", str(pm)], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            parts.append(r.stdout.strip())
+    except Exception:
+        pass
+
+hook_output("SessionStart", "\n\n".join(parts)[:10000])

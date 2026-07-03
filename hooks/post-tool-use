@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-# T1 skeleton. T10 will wire: capture script edits / training commands into raw_memory drafts (summary only).
+"""PostToolUse: nudge manifest update / log capture on script edits & training commands."""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mlagent.hooks import hook_output, read_hook_input
+from mlagent.hooks import read_hook_input, hook_output
 
 data = read_hook_input()
 tool = data.get("tool_name", "unknown")
-hook_output("PostToolUse", f"mlagent observed {tool}. (skeleton — capture wiring lands in T10.)")
+tool_input = data.get("tool_input", {})
+file_path = tool_input.get("file_path", "")
+command = tool_input.get("command", "")
+
+nudge = ""
+if file_path.endswith(".py"):
+    nudge = f"Script changed ({file_path}). If training: update manifest, record raw_memory with conclusion after the run."
+elif any(kw in command for kw in ("python", "train", "torchrun", "accelerate")):
+    nudge = "Training command detected. Tee stdout/stderr to runs/<id>/log.txt and metrics to runs/<id>/metrics.json."
+
+hook_output("PostToolUse", nudge or f"mlagent observed {tool}.")
