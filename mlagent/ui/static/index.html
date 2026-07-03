@@ -43,12 +43,36 @@
     <div class="tab" :class="tab==='f2' ? 'active' : ''" @click="tab='f2'">📊 记忆看板</div>
 </div>
 
-<!-- F1: 实时代码审核（S2 完善） -->
+<!-- F1: 实时代码审核 -->
 <div class="content" x-show="tab==='f1'">
-    <div class="placeholder">
-        <p>📋 F1 实时代码审核面板</p>
-        <p style="font-size:0.85rem">S2 将完成：manifest 驱动的结构化脚本视图 + 改动实时刷新</p>
-        <p style="font-size:0.8rem;color:#444">当前可用 API: <code>GET /api/script?path=train.py</code></p>
+    <div style="margin-bottom:1rem">
+        <input type="text" x-model="script_path" @keyup.enter="fetch_script()" placeholder="脚本路径（如 train.py）" style="width:300px">
+        <button @click="fetch_script()" style="margin-left:0.5rem;padding:0.4rem 1rem;background:#e94560;color:#fff;border:none;border-radius:4px;cursor:pointer">加载</button>
+        <span style="margin-left:0.5rem;font-size:0.8rem;color:#555">每 3 秒自动刷新</span>
+    </div>
+    <div style="display:flex;gap:1rem">
+        <div style="width:250px;flex-shrink:0" x-show="script_data.manifest && script_data.manifest.steps && script_data.manifest.steps.length">
+            <h3 style="font-size:0.9rem;color:#888;margin:0 0 0.5rem">📋 结构化步骤</h3>
+            <template x-for="(step, i) in (script_data.manifest?.steps || [])" :key="i">
+                <div class="card" style="padding:0.6rem">
+                    <strong x-text="step.title || step.id"></strong>
+                    <p style="font-size:0.8rem;color:#888;margin:0.2rem 0" x-text="step.purpose || ''"></p>
+                    <div x-show="step.key_params">
+                        <template x-for="(v,k) in (step.key_params || {})" :key="k">
+                            <code style="font-size:0.75rem;margin-right:0.3rem" x-text="k+'='+v"></code>
+                        </template>
+                    </div>
+                </div>
+            </template>
+        </div>
+        <div style="flex:1;min-width:0">
+            <h3 style="font-size:0.9rem;color:#888;margin:0 0 0.5rem" x-show="script_data.code">📄 代码</h3>
+            <pre style="background:#0d1117;border:1px solid #2a2a4e;border-radius:8px;padding:1rem;overflow:auto;font-size:0.82rem;line-height:1.5;max-height:70vh;white-space:pre-wrap;word-break:break-all" x-text="script_data.code" x-show="script_data.code"></pre>
+        </div>
+    </div>
+    <div class="placeholder" x-show="!script_data.code">
+        <p>输入脚本路径并点"加载"查看结构化代码视图</p>
+        <p style="font-size:0.8rem;color:#444">若脚本有 <code>.manifest.yaml</code>，左侧显示语义步骤（特征处理/划分/模型/训练/评估）</p>
     </div>
 </div>
 
@@ -152,9 +176,18 @@
             runs: [],
             search_q: '',
             search_results: [],
+            script_path: 'train.py',
+            script_data: { path: '', code: '', manifest: { steps: [] } },
             async init() {
                 await this.fetch_all();
-                setInterval(() => this.fetch_all(), 3000);
+                await this.fetch_script();
+                setInterval(() => { this.fetch_all(); this.fetch_script(); }, 3000);
+            },
+            async fetch_script() {
+                if (!this.script_path.trim()) return;
+                try {
+                    this.script_data = await (await fetch('/api/script?path=' + encodeURIComponent(this.script_path))).json();
+                } catch(e) {}
             },
             async fetch_all() {
                 try {

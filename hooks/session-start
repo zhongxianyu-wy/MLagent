@@ -36,4 +36,13 @@ if (pm / "project_profile" / "project.yaml").exists():
     except Exception:
         pass
 
+# try launch UI (detached, degrade gracefully)
+if pm.exists():
+    try:
+        r = subprocess.run([_bin, "ui", "start", "--memory-root", str(pm)], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            parts.append(r.stdout.strip())
+    except Exception:
+        parts.append("UI 启动失败（非阻塞）。")
+
 hook_output("SessionStart", "\n".join(parts)[:2000])
