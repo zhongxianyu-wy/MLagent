@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MLagent — 研发记忆系统</title>
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f1117; color: #d4d4d4; }
+        .header { background: #1a1a2e; padding: 1rem 2rem; border-bottom: 1px solid #2a2a4e; }
+        .header h1 { margin: 0; font-size: 1.3rem; color: #e94560; }
+        .tabs { display: flex; gap: 0; background: #1a1a2e; padding: 0 2rem; border-bottom: 1px solid #2a2a4e; }
+        .tab { padding: 0.6rem 1.2rem; cursor: pointer; border-bottom: 2px solid transparent; color: #888; }
+        .tab.active { color: #e94560; border-bottom-color: #e94560; }
+        .content { padding: 1.5rem 2rem; }
+        .card { background: #1a1a2e; border-radius: 8px; padding: 1rem; margin: 0.6rem 0; border: 1px solid #2a2a4e; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 0.4rem; }
+        .badge.high { background: #2ecc71; color: #000; }
+        .badge.medium { background: #f39c12; color: #000; }
+        .badge.low { background: #e74c3c; color: #fff; }
+        .badge.verified { background: #3498db; color: #fff; }
+        .sub-tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+        .sub-tab { padding: 0.3rem 0.8rem; border-radius: 4px; background: #1a1a2e; cursor: pointer; font-size: 0.85rem; }
+        .sub-tab.active { background: #e94560; color: #fff; }
+        .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+        .stat { text-align: center; }
+        .stat .num { font-size: 1.8rem; font-weight: bold; color: #e94560; }
+        .stat .label { font-size: 0.8rem; color: #888; }
+        input[type="text"] { background: #1a1a2e; border: 1px solid #2a2a4e; color: #d4d4d4; padding: 0.4rem 0.8rem; border-radius: 4px; width: 100%; }
+        .placeholder { text-align: center; padding: 3rem; color: #555; }
+        code { background: #111; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+    </style>
+</head>
+<body x-data="mlagent()" x-init="init()">
+
+<div class="header">
+    <h1>🧬 MLagent — 研发记忆系统</h1>
+</div>
+
+<div class="tabs">
+    <div class="tab" :class="tab==='f1' ? 'active' : ''" @click="tab='f1'">📋 代码审核</div>
+    <div class="tab" :class="tab==='f2' ? 'active' : ''" @click="tab='f2'">📊 记忆看板</div>
+</div>
+
+<!-- F1: 实时代码审核（S2 完善） -->
+<div class="content" x-show="tab==='f1'">
+    <div class="placeholder">
+        <p>📋 F1 实时代码审核面板</p>
+        <p style="font-size:0.85rem">S2 将完成：manifest 驱动的结构化脚本视图 + 改动实时刷新</p>
+        <p style="font-size:0.8rem;color:#444">当前可用 API: <code>GET /api/script?path=train.py</code></p>
+    </div>
+</div>
+
+<!-- F2: 记忆看板 -->
+<div class="content" x-show="tab==='f2'">
+
+    <!-- 概览 -->
+    <div class="card">
+        <div class="stat-grid">
+            <div class="stat"><div class="num" x-text="status.raw_memory_count ?? 0"></div><div class="label">原始记忆</div></div>
+            <div class="stat"><div class="num" x-text="status.experience_count ?? 0"></div><div class="label">经验</div></div>
+            <div class="stat"><div class="num" x-text="status.skill_version_count ?? 0"></div><div class="label">SOP 版本</div></div>
+        </div>
+        <p style="text-align:center;margin-top:0.5rem;color:#888;font-size:0.85rem">
+            项目: <span x-text="status.project_name || '—'"></span> · 主指标: <span x-text="status.primary_metric || '—'"></span>
+        </p>
+    </div>
+
+    <!-- 子看板 -->
+    <div class="sub-tabs">
+        <div class="sub-tab" :class="f2tab==='sop' ? 'active' : ''" @click="f2tab='sop'">SOP 迭代</div>
+        <div class="sub-tab" :class="f2tab==='exp' ? 'active' : ''" @click="f2tab='exp'">经验</div>
+        <div class="sub-tab" :class="f2tab==='trend' ? 'active' : ''" @click="f2tab='trend'">探索趋势</div>
+        <div class="sub-tab" :class="f2tab==='search' ? 'active' : ''" @click="f2tab='search'">关键词检索</div>
+    </div>
+
+    <!-- SOP 迭代 -->
+    <div x-show="f2tab==='sop'">
+        <template x-for="s in sops.approved" :key="s.version">
+            <div class="card">
+                <strong x-text="s.name + ' / ' + s.version"></strong>
+                <span class="badge verified">已批准</span>
+                <p x-show="s.reviewer" style="color:#888;font-size:0.8rem">审批人: <span x-text="s.reviewer"></span></p>
+            </div>
+        </template>
+        <template x-for="s in sops.candidates" :key="s.version">
+            <div class="card" style="opacity:0.6">
+                <span x-text="s.name + ' / ' + s.version"></span> (待审)
+            </div>
+        </template>
+        <div class="placeholder" x-show="sops.approved.length===0 && sops.candidates.length===0">暂无 SOP</div>
+    </div>
+
+    <!-- 经验 -->
+    <div x-show="f2tab==='exp'">
+        <template x-for="e in experiences" :key="e.id">
+            <div class="card">
+                <span class="badge" :class="e.confidence" x-text="e.confidence"></span>
+                <strong x-text="e.type"></strong>: <span x-text="e.summary"></span>
+                <div x-show="e.applies_when && e.applies_when.length" style="font-size:0.8rem;color:#888;margin-top:0.3rem">
+                    适用: <span x-text="e.applies_when.join('；')"></span>
+                </div>
+            </div>
+        </template>
+        <div class="placeholder" x-show="experiences.length===0">暂无经验</div>
+    </div>
+
+    <!-- 探索趋势 -->
+    <div x-show="f2tab==='trend'">
+        <template x-for="r in runs" :key="r.id">
+            <div class="card">
+                <strong x-text="r.goal || r.id"></strong>
+                <span style="float:right;font-size:0.8rem;color:#888" x-text="r.created_at"></span>
+                <div x-show="r.conclusion" style="margin-top:0.3rem">
+                    <span class="badge" :class="r.conclusion.outcome==='confirmed' ? 'high' : (r.conclusion.outcome==='refuted' ? 'low' : 'medium')" x-text="r.conclusion.outcome"></span>
+                    <span x-text="r.conclusion.summary"></span>
+                </div>
+                <div x-show="r.results && Object.keys(r.results).length" style="font-size:0.8rem;color:#888;margin-top:0.3rem">
+                    <template x-for="(v,k) in r.results" :key="k">
+                        <code x-text="k + ': ' + v"></code>
+                    </template>
+                </div>
+            </div>
+        </template>
+        <div class="placeholder" x-show="runs.length===0">暂无探索记录</div>
+    </div>
+
+    <!-- 关键词检索 -->
+    <div x-show="f2tab==='search'">
+        <input type="text" placeholder="搜索关键词（如: leakage, feature selection, AUC）" @keyup.enter="do_search()" x-model="search_q">
+        <template x-for="m in search_results" :key="m.id">
+            <div class="card">
+                <span class="badge" x-text="m.kind"></span>
+                <strong x-text="m.id"></strong>: <span x-text="m.summary"></span>
+                <div style="font-size:0.8rem;color:#888" x-text="m.path"></div>
+            </div>
+        </template>
+        <div class="placeholder" x-show="search_results.length===0 && search_q">无匹配结果</div>
+    </div>
+
+</div>
+
+<script>
+    function mlagent() {
+        return {
+            tab: 'f2',
+            f2tab: 'sop',
+            status: {},
+            experiences: [],
+            sops: { approved: [], candidates: [] },
+            runs: [],
+            search_q: '',
+            search_results: [],
+            async init() {
+                await this.fetch_all();
+                setInterval(() => this.fetch_all(), 3000);
+            },
+            async fetch_all() {
+                try {
+                    this.status = await (await fetch('/api/status')).json();
+                    this.experiences = await (await fetch('/api/experience')).json();
+                    this.sops = await (await fetch('/api/sops')).json();
+                    this.runs = await (await fetch('/api/runs')).json();
+                } catch(e) {}
+            },
+            async do_search() {
+                if (!this.search_q.trim()) return;
+                const r = await (await fetch('/api/search?q=' + encodeURIComponent(this.search_q))).json();
+                this.search_results = r.results || [];
+            }
+        }
+    }
+</script>
+</body>
+</html>

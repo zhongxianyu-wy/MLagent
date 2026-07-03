@@ -285,6 +285,39 @@ def pull_command(
     typer.echo(f"已拉取: {memory_root.parent}")
 
 
+# --- UI 子系统 ---
+
+ui_app = typer.Typer(help="UI 子系统（本地浏览器界面）")
+app.add_typer(ui_app, name="ui")
+
+
+@ui_app.command("start")
+def ui_start(
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    port: int = typer.Option(0, "--port"),
+) -> None:
+    """启动本地 UI 服务器（detached，自动开浏览器）。"""
+    import webbrowser
+    from mlagent.ui.launch import launch
+    try:
+        p = launch(memory_root, port or None)
+    except Exception as exc:
+        typer.echo(f"UI 启动失败: {exc}")
+        raise typer.Exit(2) from exc
+    typer.echo(f"UI 已启动: http://127.0.0.1:{p}")
+    webbrowser.open(f"http://127.0.0.1:{p}")
+
+
+@ui_app.command("stop")
+def ui_stop() -> None:
+    """停止 UI 服务器。"""
+    from mlagent.ui.launch import stop
+    if stop():
+        typer.echo("UI 已停止。")
+    else:
+        typer.echo("UI 未运行。")
+
+
 def main() -> None:
     try:
         app()
