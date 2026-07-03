@@ -17,6 +17,7 @@ from mlagent.experience import add_experience
 from mlagent.io import read_yaml
 from mlagent.raw import add_raw_memory
 from mlagent.repo import init_memory_repo, memory_status
+from mlagent.sop import approve_sop, create_candidate, get_sop, list_sops, set_gate_result
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -103,6 +104,85 @@ def distill_command(
         raise typer.Exit(2) from exc
     parts = [f"{k}={v}" for k, v in summary.items() if v]
     typer.echo(f"Distill applied: {', '.join(parts) or 'no changes'}")
+
+
+@app.command("convert-to-sop")
+def convert_to_sop(
+    sop_name: str = typer.Option(..., "--sop-name"),
+    version: str = typer.Option(..., "--version"),
+    source_type: str = typer.Option("exploration", "--source-type"),
+    source_evidence: list[str] = typer.Option([], "--source-evidence"),
+    background: str = typer.Option("", "--background"),
+    reason: str = typer.Option("", "--reason"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Create a pending SOP candidate (instance → candidate with gate)."""
+    try:
+        sv = create_candidate(memory_root, sop_name, version, source_type, source_evidence, background=background, reason=reason)
+    except MlagentError as exc:
+        typer.echo(str(exc)); raise typer.Exit(2) from exc
+    typer.echo(f"Created SOP candidate: {sop_name}/{version} (gate: tests_passed=False)")
+
+
+@app.command("set-gate-result")
+def set_gate_result_command(
+    sop_name: str = typer.Option(..., "--sop-name"),
+    version: str = typer.Option(..., "--version"),
+    tests_passed: bool = typer.Option(True, "--tests-passed/--tests-failed"),
+    test_log: str = typer.Option("", "--test-log"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Record the reproduction test result for a candidate."""
+    try:
+        set_gate_result(memory_root, sop_name, version, tests_passed, test_log)
+    except MlagentError as exc:
+        typer.echo(str(exc)); raise typer.Exit(2) from exc
+    typer.echo(f"Gate result set: {sop_name}/{version} tests_passed={tests_passed}")
+
+
+@app.command("approve-sop")
+def approve_sop_command(
+    sop_name: str = typer.Option(..., "--sop-name"),
+    version: str = typer.Option(..., "--version"),
+    reviewer: str = typer.Option(..., "--reviewer"),
+    approval_note: str = typer.Option(..., "--approval-note"),
+    performance_path: Path = typer.Option(..., "--performance-path"),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+) -> None:
+    """Approve a SOP candidate after gate passed + human review."""
+    try:
+        perf = read_yaml(performance_path)
+        approved = approve_sop(memory_root, sop_name, version, reviewer, approval_note, perf)
+    except MlagentError as exc:
+        typer.echo(str(exc)); raise typer.Exit(2) from exc
+    typer.echo(f"Approved SOP: {sop_name}/{version}")
+
+
+@app.command("list-sops")
+def list_sops_command(memory_root: Path = typer.Option(Path("project_memory"), "--memory-root")) -> None:
+    """List approved SOPs and pending candidates."""
+    import json
+    try:
+        data = list_sops(memory_root)
+    except MlagentError as exc:
+        typer.echo(str(exc)); raise typer.Exit(2) from exc
+    typer.echo(json.dumps(data, indent=2, ensure_ascii=False, default=str))
+
+
+@app.command("get-sop")
+def get_sop_command(
+    sop_name: str = typer.Argument(...),
+    version: str = typer.Argument(...),
+    memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
+    include_draft: bool = typer.Option(False, "--include-draft"),
+) -> None:
+    """Show a SOP version bundle."""
+    import json
+    try:
+        bundle = get_sop(memory_root, sop_name, version, include_draft=include_draft)
+    except MlagentError as exc:
+        typer.echo(str(exc)); raise typer.Exit(2) from exc
+    typer.echo(json.dumps({k: v for k, v in bundle.items() if k != "files"}, indent=2, ensure_ascii=False, default=str))
 
 
 def main() -> None:
