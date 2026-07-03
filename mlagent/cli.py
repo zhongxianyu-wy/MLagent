@@ -116,11 +116,24 @@ def convert_to_sop(
     source_evidence: list[str] = typer.Option([], "--source-evidence"),
     background: str = typer.Option("", "--background"),
     reason: str = typer.Option("", "--reason"),
+    key_param: list[str] = typer.Option([], "--key-param", help="key=value (repeatable)"),
+    key_optimization: list[str] = typer.Option([], "--key-optimization"),
     memory_root: Path = typer.Option(Path("project_memory"), "--memory-root"),
 ) -> None:
     """Create a pending SOP candidate (instance → candidate with gate)."""
+    import json
+    key_params = {}
+    for kp in key_param:
+        if "=" in kp:
+            k, v = kp.split("=", 1)
+            try:
+                key_params[k] = json.loads(v)
+            except json.JSONDecodeError:
+                key_params[k] = v
     try:
-        sv = create_candidate(memory_root, sop_name, version, source_type, source_evidence, background=background, reason=reason)
+        sv = create_candidate(memory_root, sop_name, version, source_type, source_evidence,
+                              background=background, reason=reason,
+                              key_params=key_params, key_optimizations=key_optimization)
     except MlagentError as exc:
         typer.echo(str(exc)); raise typer.Exit(2) from exc
     typer.echo(f"Created SOP candidate: {sop_name}/{version} (gate: tests_passed=False)")
