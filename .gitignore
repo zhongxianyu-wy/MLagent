@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Build / packaging
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Test / type cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local project memory + run outputs (created per-project by mlagent)
+/project_memory/
+/runs/

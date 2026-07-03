@@ -1,0 +1,7 @@
+{
+  "name": "mlagent",
+  "version": "0.1.0",
+  "description": "Project-level ML modeling memory (raw/experience/Skill-SOP) + R&D asset visualization for Claude Code",
+  "author": { "name": "MLagent" },
+  "license": "MIT"
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlagent"
+version = "0.1.0"
+description = "Claude Code plugin: project-level ML modeling memory (raw/experience/Skill-SOP) + R&D asset visualization"
+requires-python = ">=3.10"
+dependencies = [
+  "typer>=0.12",
+  "pydantic>=2.7",
+  "pyyaml>=6.0",
+  "sqlite-utils>=3.36",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mlagent = "mlagent.cli:main"
+
+# Restrict discovery to the Python package only (hooks/ and skills/ are plugin
+# assets, not importable packages).
+[tool.setuptools.packages.find]
+include = ["mlagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

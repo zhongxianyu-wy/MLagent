@@ -1,0 +1,11 @@
+{
+  "name": "mlagent",
+  "owner": { "name": "MLagent" },
+  "plugins": [
+    {
+      "name": "mlagent",
+      "source": ".",
+      "description": "Project-level ML modeling memory + Skill-SOP library for Claude Code"
+    }
+  ]
+}

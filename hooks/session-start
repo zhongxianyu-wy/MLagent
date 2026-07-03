@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+# T1 skeleton. T10 will wire: git pull (sync) + bootstrap context inject + UI start (degrade to terminal if UI absent).
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from mlagent.hooks import hook_output
+
+hook_output("SessionStart", "mlagent v0.3 loaded. (skeleton — wiring lands in T10.)")

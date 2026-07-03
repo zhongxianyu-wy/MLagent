@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+# T1 skeleton. T10 will wire: capture script edits / training commands into raw_memory drafts (summary only).
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from mlagent.hooks import hook_output, read_hook_input
+
+data = read_hook_input()
+tool = data.get("tool_name", "unknown")
+hook_output("PostToolUse", f"mlagent observed {tool}. (skeleton — capture wiring lands in T10.)")
