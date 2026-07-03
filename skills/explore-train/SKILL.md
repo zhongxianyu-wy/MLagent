@@ -1,5 +1,5 @@
 ---
-description: Use when the user wants to explore a new ML direction, build a baseline, or run a training experiment. You write code grounded by injected experience; the human reviews. Flexible — no enforced structure.
+description: 当用户想探索新方向、建基线或跑训练时使用。灵活探索——不强制结构化，靠经验库注入对齐代码风格，人审核。
 ---
 
 # Explore + Train

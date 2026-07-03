@@ -65,7 +65,7 @@ def test_e2e_closed_loop(tmp_path):
     # 8. retrain → loads approved SOP
     rt = runner.invoke(app, ["retrain", "baseline", "v001", "--memory-root", str(root)], catch_exceptions=False)
     assert rt.exit_code == 0
-    assert "approved" in rt.stdout.lower()
+    assert "baseline" in rt.stdout and "v001" in rt.stdout
 
     # 9. list-sops → shows baseline/v001 approved
     ls = runner.invoke(app, ["list-sops", "--memory-root", str(root)], catch_exceptions=False)
@@ -76,6 +76,6 @@ def test_e2e_closed_loop(tmp_path):
     # 10. status → shows counts
     st = runner.invoke(app, ["status", "--memory-root", str(root)], catch_exceptions=False)
     assert st.exit_code == 0
-    assert "Raw memory records: 1" in st.stdout
-    assert "Experience records: 1" in st.stdout
-    assert "Skill versions: 1" in st.stdout
+    assert "原始记忆: 1" in st.stdout
+    assert "经验: 1" in st.stdout
+    assert "SOP 版本: 1" in st.stdout

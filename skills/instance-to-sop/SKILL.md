@@ -1,5 +1,5 @@
 ---
-description: Use when the user wants to promote a best run or notebook into a versioned Skill-SOP. Requires a passing reproduction test + human approval. Strict gate — no bypass.
+description: 当用户想把最佳实例/notebook 提升为版本化 SOP 时使用。需通过复现测试门禁 + 人工审批，严格不可绕过。
 ---
 
 # Instance → SOP

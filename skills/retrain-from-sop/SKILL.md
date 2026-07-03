@@ -1,5 +1,5 @@
 ---
-description: Use when the user wants to strictly retrain from an approved SOP version. Loads the SOP directly and follows its procedure for deterministic, reproducible retraining.
+description: 当用户想按某个已批准 SOP 版本严格重训时使用。直读 SOP，确定性复现——相同输入→相同产出。
 ---
 
 # Retrain From SOP

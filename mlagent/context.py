@@ -1,12 +1,14 @@
-"""Assemble exploration context (experience injection for explore-train).
+"""Assemble exploration context — progressive disclosure + relevance-filtered.
 
-Reads the experience layer (filtered: high/medium confidence, not contradicted/
-superseded) + code conventions + SOP list + data understanding → a structured
-pack that explore-train injects so Claude writes code grounded in project style.
+Default (summary mode): returns only {id, summary, confidence} for the top-N
+most relevant entries (keyword overlap with the prompt). Conventions (code-style
+base) are always included (up to limit) since they apply universally.
+Use full=True for complete fields (detail, applies_when, avoid_when, etc.).
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,25 +20,32 @@ def _safe_text(path: Path) -> str:
     return read_text(path) if path.exists() else ""
 
 
-def assemble_context(root: Path, prompt: str) -> dict[str, Any]:
+def _relevance(prompt_words: set[str], text: str) -> int:
+    lowered = text.lower()
+    return sum(1 for w in prompt_words if w in lowered)
+
+
+def assemble_context(
+    root: Path,
+    prompt: str,
+    summary: bool = True,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Assemble a context pack for explore-train. Default = concise + relevant top-N."""
     require_memory_repo(root)
+    prompt_words = set(re.findall(r"[a-z]{2,}", prompt.lower()))
 
-    # data understanding
-    du = "\n".join([
-        _safe_text(root / "data_understanding/dataset_card.md"),
-        _safe_text(root / "data_understanding/label_definition.md"),
-    ]).strip()
+    # data understanding (brief)
+    du = _safe_text(root / "data_understanding/dataset_card.md").strip()
 
-    # experience (filtered) + conventions (code-style base)
+    # scan experience layer
     experiences: list[dict[str, Any]] = []
     conventions: list[dict[str, Any]] = []
     exp_root = root / "experience"
     if exp_root.exists():
         for path in sorted(exp_root.rglob("*.yaml")):
             data = read_yaml(path)
-            if data.get("superseded_by"):
-                continue
-            if data.get("verified") in ("contradicted", "rolled_back"):
+            if data.get("superseded_by") or data.get("verified") in ("contradicted", "rolled_back"):
                 continue
             if data.get("confidence") not in ("high", "medium"):
                 continue
@@ -44,20 +53,28 @@ def assemble_context(root: Path, prompt: str) -> dict[str, Any]:
                 "id": data.get("id"),
                 "type": data.get("type"),
                 "summary": data.get("summary", ""),
-                "detail": data.get("detail", ""),
                 "confidence": data.get("confidence"),
-                "applies_when": data.get("applies_when", []),
-                "avoid_when": data.get("avoid_when", []),
             }
+            if not summary:
+                entry["detail"] = data.get("detail", "")
+                entry["applies_when"] = data.get("applies_when", [])
+                entry["avoid_when"] = data.get("avoid_when", [])
+
             if data.get("type") == "convention":
                 conventions.append(entry)
             else:
+                entry["_score"] = _relevance(prompt_words, data.get("summary", "") + " " + " ".join(data.get("applies_when", [])))
                 experiences.append(entry)
 
-    # approved SOPs
+    # relevance-sort + limit experiences; conventions always included (universal style)
+    experiences.sort(key=lambda e: -e.pop("_score", 0))
+    experiences = experiences[:limit]
+    conventions = conventions[:limit]
+
+    # approved SOPs (names only)
     registry = read_yaml(root / "skill_library" / "registry.yaml")
     sops = [
-        {"name": v.get("name"), "version": v.get("version"), "state": v.get("state")}
+        {"name": v.get("name"), "version": v.get("version")}
         for v in registry.get("versions", [])
     ]
 

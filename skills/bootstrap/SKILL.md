@@ -1,5 +1,5 @@
 ---
-description: Use at the start of every ML modeling session in a project with MLagent. Injected by the SessionStart hook. Frames the 5-skill workflow, how to record raw_memory with conclusion, and how memory feeds back.
+description: 会话开始时使用。了解 MLagent 工作流：如何记录 raw_memory（含 conclusion）、蒸馏经验、提升 SOP、重训。由 SessionStart hook 自动注入。
 ---
 
 # MLagent Bootstrap

@@ -1,5 +1,5 @@
 ---
-description: Use at session end (Stop hook triggers automatically) or on demand to distill raw_memory into experience entries. Reviews raw since last distill, produces a structured plan, applies deterministically.
+description: 会话结束（Stop hook 自动触发）或手动调用。回顾 raw_memory，产出有意义的经验（性能提升/坑），无意义不产出，带置信度与溯源。
 ---
 
 # Distill Experience
