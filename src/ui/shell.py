@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.domain.models import WorkspaceSnapshot
+from src.domain.models import DatasetVersionSnapshot, WorkspaceSnapshot
 
 
 NAVIGATION = (
@@ -43,25 +43,36 @@ class ShellState:
     indexed_assets: int
     capacity_text: str
     issues: tuple[dict[str, str], ...]
+    dataset: DatasetVersionSnapshot | None
 
 
-def build_shell_state(snapshot: WorkspaceSnapshot) -> ShellState:
+def build_shell_state(
+    snapshot: WorkspaceSnapshot,
+    dataset: DatasetVersionSnapshot | None = None,
+) -> ShellState:
     git_status = {
         "reachable": "Success",
         "not_configured": "Pending confirmation",
         "unreachable": "Failed",
         "invalid": "Failed",
     }.get(snapshot.remote.state, "Failed")
+    module_status = {module: "Not started" for module in NAVIGATION}
+    if dataset is not None:
+        module_status["Dataset Overview"] = "Success"
     return ShellState(
         navigation=NAVIGATION,
         context={
             "workspace": snapshot.repository_id,
-            "dataset": "Not started",
+            "dataset": (
+                "Not started"
+                if dataset is None
+                else f"{dataset.dataset_id} v{dataset.version}"
+            ),
             "run": "Not started",
             "git": git_status,
             "writer": snapshot.actor_id,
         },
-        module_status={module: "Not started" for module in NAVIGATION},
+        module_status=module_status,
         schema_version=snapshot.schema_version,
         indexed_assets=snapshot.indexed_assets,
         capacity_text=(
@@ -69,6 +80,7 @@ def build_shell_state(snapshot: WorkspaceSnapshot) -> ShellState:
             f"{_format_bytes(snapshot.capacity.max_repository_bytes)}"
         ),
         issues=tuple(issue.to_dict() for issue in snapshot.issues),
+        dataset=dataset,
     )
 
 

@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from src.domain.models import CapacityStatus, RemoteStatus, WorkspaceSnapshot
+from src.domain.models import (
+    CapacityStatus,
+    DatasetPreview,
+    DatasetVersionSnapshot,
+    RemoteStatus,
+    WorkspaceSnapshot,
+)
 from src.ui.shell import GLOBAL_STATUS_VOCABULARY, NAVIGATION, build_shell_state
 
 
@@ -28,6 +34,48 @@ def workspace_snapshot() -> WorkspaceSnapshot:
         ),
         ready=True,
         issues=(),
+    )
+
+
+def dataset_version() -> DatasetVersionSnapshot:
+    return DatasetVersionSnapshot(
+        asset_id="ds-1-v0001",
+        asset_path="datasets/ds-1/v0001/manifest.json",
+        dataset_id="ds-1",
+        version=1,
+        state="confirmed",
+        schema_version=1,
+        created_at="2026-07-14T00:00:00Z",
+        created_by="alice",
+        content_fingerprint="content-sha",
+        version_fingerprint="version-sha",
+        source_files=(),
+        sample_id_col="sample_id",
+        label_col="group",
+        task_type="binary",
+        class_labels=("case", "control"),
+        positive_class="case",
+        primary_metric="roc_auc",
+        target_metric=0.9,
+        split_strategy="train_only",
+        test_ratio=None,
+        random_seed=42,
+        sample_count=12,
+        feature_count=2,
+        dtypes={"f1": "float64", "f2": "int64"},
+        missing_rates={"f1": 0.0, "f2": 0.0},
+        class_distribution={"case": 6, "control": 6},
+        preview=DatasetPreview(
+            columns=("sample_id", "f1", "f2", "group"),
+            rows=(("s1", 0.1, 1, "case"),),
+            omitted_count=2,
+        ),
+        warnings=(),
+        files={
+            "features": "features.csv",
+            "labels": "labels.csv",
+            "split": "split.csv",
+        },
     )
 
 
@@ -66,3 +114,11 @@ def test_shell_exposes_the_approved_global_status_vocabulary():
         "Pending sync",
         "Conflict",
     )
+
+
+def test_shell_uses_confirmed_dataset_version_in_context_and_module_status():
+    shell = build_shell_state(workspace_snapshot(), dataset_version())
+
+    assert shell.context["dataset"] == "ds-1 v1"
+    assert shell.module_status["Dataset Overview"] == "Success"
+    assert shell.dataset == dataset_version()
