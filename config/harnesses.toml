@@ -1,0 +1,62 @@
+[[harnesses]]
+harness_id = "intake"
+commands = ["/intake"]
+domain_action = "intake"
+required_inputs = ["path"]
+allow_plan_promotion = false
+source = "seed_config"
+description = "Inspect files and build a DatasetManifest."
+
+[[harnesses]]
+harness_id = "explore"
+commands = ["/explore", "/train_type1"]
+domain_action = "explore"
+required_inputs = ["dataset_or_path", "objective"]
+allow_plan_promotion = true
+source = "seed_config"
+description = "Run feature exploration."
+
+[[harnesses]]
+harness_id = "reproduce"
+commands = ["/reproduce"]
+domain_action = "reproduce"
+required_inputs = ["skill_id", "dataset_or_path"]
+allow_plan_promotion = false
+source = "seed_config"
+description = "Strictly reproduce an approved Skill."
+
+[[harnesses]]
+harness_id = "interactive_validate"
+commands = ["/interact", "/validate"]
+domain_action = "interactive_validate"
+required_inputs = ["instruction", "dataset_or_path"]
+allow_plan_promotion = true
+source = "seed_config"
+description = "Run one user-directed validation and pause."
+
+[[harnesses]]
+harness_id = "distill"
+commands = ["/distill"]
+domain_action = "distill"
+required_inputs = ["source"]
+allow_plan_promotion = false
+source = "seed_config"
+description = "Create a SkillCandidate from a notebook or best run."
+
+[[harnesses]]
+harness_id = "research"
+commands = ["/research"]
+domain_action = "research"
+required_inputs = ["target"]
+allow_plan_promotion = false
+source = "seed_config"
+description = "Research papers or projects and ingest memory."
+
+[[harnesses]]
+harness_id = "skill_opt"
+commands = ["/skill_opt"]
+domain_action = "skill_opt"
+required_inputs = ["skill_id"]
+allow_plan_promotion = false
+source = "seed_config"
+description = "Optimize an approved Skill with review gate."

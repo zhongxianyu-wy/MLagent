@@ -1,0 +1,25 @@
+[project]
+name = "mlagent-v3"
+version = "0.1.0"
+description = "Local NGS machine-learning experiment agent"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.5.0",
+    "xgboost>=2.1.0",
+    "mem0ai>=0.1.0",
+    "chromadb>=0.6.0",
+    "mlflow>=2.19.0",
+    "nbformat>=5.10.0",
+    "streamlit>=1.41.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

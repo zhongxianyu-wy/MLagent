@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MLagent_v3 使用与验收指南</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172026;
+      --muted: #5c6973;
+      --line: #d8e0e6;
+      --soft: #f5f8fa;
+      --panel: #ffffff;
+      --accent: #1769aa;
+      --accent-2: #0b7a75;
+      --warn: #9a5b00;
+      --bad: #a13a32;
+      --good: #1f7a4d;
+      --code: #0f1720;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+      color: var(--ink);
+      background: #eef3f6;
+      line-height: 1.62;
+    }
+    header {
+      padding: 34px 28px 24px;
+      background: #102432;
+      color: white;
+    }
+    header h1 {
+      margin: 0 0 10px;
+      font-size: 30px;
+      letter-spacing: 0;
+    }
+    header p {
+      max-width: 980px;
+      margin: 0;
+      color: #d6e2ea;
+      font-size: 16px;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 26px 20px 56px;
+    }
+    nav, section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      margin: 18px 0;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+      letter-spacing: 0;
+    }
+    h3 {
+      margin: 24px 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+    h4 {
+      margin: 18px 0 8px;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+    a { color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 12px;
+    }
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--soft);
+      min-height: 116px;
+    }
+    .tile strong { display: block; margin-bottom: 4px; }
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-left: 6px;
+      vertical-align: 1px;
+    }
+    .ok { color: var(--good); background: #e9f7ef; }
+    .partial { color: var(--warn); background: #fff4df; }
+    .reserved { color: var(--muted); background: #eef2f5; }
+    .danger { color: var(--bad); background: #fdecea; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.94em;
+      background: #edf2f5;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    pre {
+      margin: 10px 0 14px;
+      padding: 14px 16px;
+      overflow: auto;
+      background: var(--code);
+      color: #edf7ff;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.52;
+    }
+    pre code {
+      background: transparent;
+      padding: 0;
+      color: inherit;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 18px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #e9f0f4;
+      font-weight: 700;
+    }
+    ul, ol { padding-left: 22px; }
+    li { margin: 5px 0; }
+    .note {
+      border-left: 4px solid var(--accent);
+      background: #edf6fc;
+      padding: 11px 14px;
+      margin: 12px 0;
+      border-radius: 0 8px 8px 0;
+    }
+    .warn {
+      border-left-color: var(--warn);
+      background: #fff7e8;
+    }
+    .pass {
+      border-left-color: var(--good);
+      background: #eef9f3;
+    }
+    .checklist label {
+      display: block;
+      padding: 7px 0;
+      border-bottom: 1px solid #edf1f4;
+    }
+    .small { color: var(--muted); font-size: 13px; }
+    .toc a {
+      display: block;
+      padding: 5px 0;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MLagent_v3 使用与验收指南</h1>
+    <p>
+      本指南用于按功能逐项测试当前项目。它以当前代码为准，区分“可直接运行”“服务层可验证”和“已预留但尚未产品化入口”的能力，避免把规划功能误当成已经完整上线的 CLI 功能。
+    </p>
+  </header>
+
+  <main>
+    <nav class="toc">
+      <h2>目录</h2>
+      <div class="grid">
+        <div>
+          <a href="#overview">1. 当前可测范围</a>
+          <a href="#prepare">2. 环境准备</a>
+          <a href="#llm">3. LLM / MiniMax 配置验证</a>
+          <a href="#shell">4. 交互 Shell 测试</a>
+          <a href="#intake">5. 数据接入与标准化</a>
+        </div>
+        <div>
+          <a href="#explore">6. 特征探索训练</a>
+          <a href="#reproduce">7. Skill 复现</a>
+          <a href="#distill">8. Skill 沉淀</a>
+          <a href="#memory">9. 记忆与 Dream</a>
+          <a href="#research">10. 调研功能</a>
+        </div>
+        <div>
+          <a href="#frontend">11. 前端服务接口</a>
+          <a href="#safety">12. 安全钩子</a>
+          <a href="#fulltest">13. 全量测试</a>
+          <a href="#troubleshooting">14. 常见问题</a>
+          <a href="#checklist">15. 验收清单</a>
+        </div>
+      </div>
+    </nav>
+
+    <section id="overview">
+      <h2>1. 当前可测范围</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>功能</th>
+            <th>当前状态</th>
+            <th>推荐测试方式</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>LLM 问答</td>
+            <td><span class="status ok">可直接运行</span></td>
+            <td>交互 CLI：<code>/ask</code></td>
+            <td>已切换为 MiniMax OpenAI-compatible 协议，并通过真实请求。</td>
+          </tr>
+          <tr>
+            <td>数据接入 Intake</td>
+            <td><span class="status ok">可直接运行</span></td>
+            <td>one-shot CLI：<code>intake</code></td>
+            <td>支持清晰 CSV 输入，生成标准化 manifest、训练特征、训练标签和 intake report。</td>
+          </tr>
+          <tr>
+            <td>随机划分</td>
+            <td><span class="status ok">可直接运行</span></td>
+            <td><code>intake --split-strategy random</code></td>
+            <td>生成训练集和测试集文件；小样本划分已做保护。</td>
+          </tr>
+          <tr>
+            <td>特征探索 Explore</td>
+            <td><span class="status ok">可直接运行</span></td>
+            <td>one-shot CLI：<code>explore --manifest-path</code></td>
+            <td>当前真实训练使用 sklearn logistic regression + k-fold，轮次策略覆盖预处理和特征子集选择方向。</td>
+          </tr>
+          <tr>
+            <td>Slash command harness</td>
+            <td><span class="status partial">服务层可验证</span></td>
+            <td>pytest 或 Python snippet</td>
+            <td><code>/train_type1</code> 能确定路由到 explore harness；默认交互 shell 尚未注入 RunService。</td>
+          </tr>
+          <tr>
+            <td>Plan 模式</td>
+            <td><span class="status partial">服务层可验证</span></td>
+            <td>Python snippet / contract test</td>
+            <td>能生成 validation plan 和开放问题；默认 shell 目前不会漂亮展示非 chunks 返回。</td>
+          </tr>
+          <tr>
+            <td>Skill 复现</td>
+            <td><span class="status partial">服务层可验证</span></td>
+            <td>pytest / adapter snippet</td>
+            <td>StrictSkillReproductionAdapter 已能读取 manifest 并写 summary/metrics；main 的 <code>reproduce</code> one-shot 入口目前只转发 factory。</td>
+          </tr>
+          <tr>
+            <td>Skill 沉淀</td>
+            <td><span class="status partial">服务层可验证</span></td>
+            <td>pytest / generator snippet</td>
+            <td>Notebook 到 SkillCandidate 草稿已实现；人工审核、发布入口仍是服务层。</td>
+          </tr>
+          <tr>
+            <td>调研</td>
+            <td><span class="status reserved">预留边界</span></td>
+            <td>服务层返回 unavailable</td>
+            <td>MuyuSearchClient 边界存在，但当前项目内客户端未连接真实 MCP。</td>
+          </tr>
+          <tr>
+            <td>前端 API</td>
+            <td><span class="status partial">契约可验证</span></td>
+            <td>ApiRouter contract test</td>
+            <td>不是 FastAPI/HTTP server，仅是前端 API 路由契约对象。</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="note warn">
+        <strong>重要：</strong>当前最适合做“真实 NGS 特征矩阵实验”的入口是 one-shot CLI 的 <code>intake</code> + <code>explore</code>。默认 <code>uv run python -m src.agent.main</code> 交互 shell 现在适合先测 LLM ask，不适合直接测完整 agent 执行链。
+      </div>
+    </section>
+
+    <section id="prepare">
+      <h2>2. 环境准备</h2>
+      <h3>2.1 进入项目目录</h3>
+      <pre><code>cd /Volumes/exp/project/MLagent_v3</code></pre>
+
+      <h3>2.2 安装或同步依赖</h3>
+      <pre><code>uv sync</code></pre>
+      <p>如果遇到 uv 缓存目录权限问题，可在 Codex 环境中允许 <code>uv run</code> 访问用户缓存；在普通终端通常不会遇到这个沙箱问题。</p>
+
+      <h3>2.3 确认 Python 入口可用</h3>
+      <pre><code>uv run python -m src.agent.main status</code></pre>
+      <p>预期：命令静默成功，退出码为 0。</p>
+
+      <h3>2.4 查看当前配置摘要</h3>
+      <pre><code>uv run python -c "from src.provider.config import load_provider_config; c=load_provider_config(); print(c)"</code></pre>
+      <p>预期包含：</p>
+      <ul>
+        <li><code>provider_name='minimax'</code></li>
+        <li><code>base_url='https://api.minimaxi.com/v1'</code></li>
+        <li><code>api_key_env='MINIMAX_API_KEY'</code></li>
+        <li><code>model='MiniMax-M2.7'</code></li>
+        <li><code>api_protocol='openai-completions'</code></li>
+      </ul>
+    </section>
+
+    <section id="llm">
+      <h2>3. LLM / MiniMax 配置验证</h2>
+      <p>当前项目使用 OpenAI-compatible chat completions 请求：</p>
+      <ul>
+        <li>Base URL：<code>https://api.minimaxi.com/v1</code></li>
+        <li>接口路径：<code>/chat/completions</code></li>
+        <li>鉴权方式：<code>Authorization: Bearer $MINIMAX_API_KEY</code></li>
+        <li>模型：<code>MiniMax-M2.7</code></li>
+      </ul>
+
+      <h3>3.1 最小真实请求</h3>
+      <pre><code>uv run python -c "from src.provider.client import LLMClient; from src.provider.config import load_provider_config; c=load_provider_config(); client=LLMClient(c); print('provider', c.provider_name); print('protocol', c.api_protocol); print('base', c.base_url); print('model', c.model); print('has_key', bool(client.api_key)); print('response', ''.join(client.stream('请只回复 ok'))[:500])"</code></pre>
+      <p>预期输出最后一行：</p>
+      <pre><code>response ok</code></pre>
+
+      <h3>3.2 测试响应过滤</h3>
+      <p>MiniMax 有时会把 <code>&lt;think&gt;...&lt;/think&gt;</code> 放入正文。项目已在 OpenAI-compatible 响应中做过滤，CLI 应只显示最终回答。</p>
+    </section>
+
+    <section id="shell">
+      <h2>4. 交互 Shell 测试</h2>
+      <h3>4.1 启动交互 shell</h3>
+      <pre><code>uv run python -m src.agent.main</code></pre>
+      <p>看到提示符后输入：</p>
+      <pre><code>mlagent&gt; /ask 你是什么模型？</code></pre>
+      <p>预期：返回 MiniMax 模型生成的自然语言回答。退出 shell：</p>
+      <pre><code>mlagent&gt; /exit</code></pre>
+
+      <h3>4.2 默认 shell 当前限制</h3>
+      <div class="note warn">
+        默认 shell 当前只注入了 LLM，没有注入 <code>RunService</code> 和 harness registry。所以：
+        <ul>
+          <li><code>/ask</code>：可直接测。</li>
+          <li><code>/plan</code>：服务层能生成 plan，但默认 shell 不会展示 plan dict。</li>
+          <li><code>/agent</code>、<code>/train_type1</code>、<code>/explore</code>：默认 shell 中会因为缺少 run service 而不适合直接执行。</li>
+        </ul>
+      </div>
+
+      <h3>4.3 Slash command 路由服务层验证</h3>
+      <pre><code>uv run pytest tests/integration/test_train_type1_routing.py -q</code></pre>
+      <p>预期：</p>
+      <pre><code>1 passed</code></pre>
+      <p>这证明 <code>/train_type1 用 demo 做特征探索，目标 AUC</code> 会强制路由到 <code>explore</code> harness，并保留自然语言尾部。</p>
+    </section>
+
+    <section id="intake">
+      <h2>5. 数据接入与标准化</h2>
+      <h3>5.1 输入文件要求</h3>
+      <p>当前自动识别支持 CSV 文件，推荐目录内包含：</p>
+      <ul>
+        <li><code>features.csv</code>：第一列为 <code>sample_id</code>，其余列为数值特征。</li>
+        <li><code>labels.csv</code>：包含 <code>sample_id</code> 和 <code>group</code>。</li>
+      </ul>
+      <p>内置 fixture 位于：</p>
+      <pre><code>tests/fixtures/data_intake/clear</code></pre>
+
+      <h3>5.2 训练集-only 标准化</h3>
+      <pre><code>uv run python -m src.agent.main intake \
+  tests/fixtures/data_intake/clear \
+  --output-root experiments/standardized \
+  --split-strategy train_only</code></pre>
+      <p>预期生成：</p>
+      <pre><code>experiments/standardized/clear/manifest.json
+experiments/standardized/clear/train_features.csv
+experiments/standardized/clear/train_labels.csv
+experiments/standardized/clear/intake_report.md</code></pre>
+
+      <h3>5.3 随机划分训练集/测试集</h3>
+      <pre><code>uv run python -m src.agent.main intake \
+  tests/fixtures/data_intake/clear \
+  --output-root experiments/standardized_random \
+  --split-strategy random \
+  --split-ratio 0.25 \
+  --random-seed 42</code></pre>
+      <p>预期额外生成：</p>
+      <pre><code>experiments/standardized_random/clear/test_features.csv
+experiments/standardized_random/clear/test_labels.csv</code></pre>
+
+      <h3>5.4 查看 manifest</h3>
+      <pre><code>cat experiments/standardized/clear/manifest.json</code></pre>
+      <p>重点检查：</p>
+      <ul>
+        <li><code>dataset_id</code> 是否正确。</li>
+        <li><code>sample_id_col</code> 是否为 <code>sample_id</code>。</li>
+        <li><code>label_col</code> 是否为 <code>group</code>。</li>
+        <li><code>train_feature_path</code> 和 <code>train_label_path</code> 是否指向真实文件。</li>
+      </ul>
+
+      <h3>5.5 模糊输入的苏格拉底式状态</h3>
+      <p>模糊 fixture：</p>
+      <pre><code>tests/fixtures/data_intake/ambiguous</code></pre>
+      <p>当前 one-shot CLI 遇到未 ready 的 inspection 会返回退出码 2，不会进入多轮问答。服务层支持 <code>answer_clarification</code>，可用测试验证：</p>
+      <pre><code>uv run pytest tests/contract/test_data_intake.py -q</code></pre>
+    </section>
+
+    <section id="explore">
+      <h2>6. 特征探索训练</h2>
+      <h3>6.1 先准备 manifest</h3>
+      <pre><code>uv run python -m src.agent.main intake \
+  tests/fixtures/data_intake/clear \
+  --output-root experiments/standardized \
+  --split-strategy train_only</code></pre>
+
+      <h3>6.2 跑 1 轮真实探索</h3>
+      <pre><code>uv run python -m src.agent.main explore \
+  --manifest-path experiments/standardized/clear/manifest.json \
+  --max-rounds 1 \
+  --output-root experiments/outputs</code></pre>
+      <p>预期生成：</p>
+      <pre><code>experiments/outputs/explore-clear/run_summary.json
+experiments/outputs/explore-clear/rounds.jsonl
+experiments/outputs/explore-clear/best_config.json
+experiments/outputs/explore-clear/metrics.json</code></pre>
+
+      <h3>6.3 跑多轮探索</h3>
+      <pre><code>uv run python -m src.agent.main explore \
+  --manifest-path experiments/standardized/clear/manifest.json \
+  --max-rounds 6 \
+  --output-root experiments/outputs</code></pre>
+      <p>当前轮次策略会循环以下方向：</p>
+      <ul>
+        <li>预处理：由 <code>src/training/preprocessing.py</code> 规划。</li>
+        <li>特征子集选择：<code>low_variance</code>、<code>correlation_filter</code>、<code>statistical_test</code>、<code>model_importance</code>、<code>recursive_selection</code>、<code>stability_selection</code>。</li>
+      </ul>
+      <p>训练模型当前为 sklearn logistic regression，k-fold 默认是 2。阈值由训练集 k-fold validation 预测选择。</p>
+
+      <h3>6.4 查看每轮 trace</h3>
+      <pre><code>cat experiments/outputs/explore-clear/rounds.jsonl</code></pre>
+      <p>重点检查字段：</p>
+      <ul>
+        <li><code>exploration_direction</code></li>
+        <li><code>preprocessing_strategy</code></li>
+        <li><code>feature_subset_strategy</code></li>
+        <li><code>cv_metrics</code></li>
+        <li><code>selected_threshold</code></li>
+        <li><code>guidance_metric_value</code></li>
+      </ul>
+
+      <h3>6.5 查看最佳配置</h3>
+      <pre><code>cat experiments/outputs/explore-clear/best_config.json
+cat experiments/outputs/explore-clear/metrics.json</code></pre>
+      <div class="note">
+        当前 CLI <code>explore</code> 没有暴露 <code>--k-folds</code>、<code>--target-specificity</code>、<code>--threshold-policy</code> 等参数；底层 harness 已有字段，后续可以把这些选项补到 CLI。
+      </div>
+    </section>
+
+    <section id="reproduce">
+      <h2>7. Skill 复现</h2>
+      <h3>7.1 当前支持方式</h3>
+      <p>严格复现能力主要在服务层 <code>StrictSkillReproductionAdapter</code>。当前 <code>src.agent.main reproduce</code> 只组装 request 并依赖 factory；直接 CLI 尚未接上真实 adapter。</p>
+
+      <h3>7.2 运行现有复现集成测试</h3>
+      <pre><code>uv run pytest tests/integration/test_product_reproduce_cli.py tests/integration/test_skill_strict_reproduction.py -q</code></pre>
+      <p>预期：全部通过。</p>
+
+      <h3>7.3 手动服务层复现示例</h3>
+      <pre><code>uv run python -c "from pathlib import Path; from src.frontend_api.dataset_service import DatasetService; from src.agent.harness import StrictSkillReproductionAdapter; from src.skill_bridge.registry import SkillRegistry; ds=DatasetService(output_root='experiments/standardized_repro'); ins=ds.inspect_path('tests/fixtures/data_intake/clear'); manifest=ds.build_manifest(ins.session_id); adapter=StrictSkillReproductionAdapter(registry=SkillRegistry(root='tests/fixtures/skills'), output_root='experiments/outputs'); result=adapter.reproduce(skill_id='ngs-xgboost-baseline', dataset={'manifest_path':'experiments/standardized_repro/clear/manifest.json','experiment_id':'repro-clear'}); print(result)"</code></pre>
+      <p>预期生成：</p>
+      <pre><code>experiments/outputs/repro-clear/run_summary.json
+experiments/outputs/repro-clear/metrics.json</code></pre>
+    </section>
+
+    <section id="distill">
+      <h2>8. Skill 沉淀</h2>
+      <h3>8.1 Notebook 到 SkillCandidate</h3>
+      <p>fixture notebook：</p>
+      <pre><code>tests/fixtures/notebooks/skill_source.ipynb</code></pre>
+      <p>运行测试：</p>
+      <pre><code>uv run pytest tests/contract/test_skill_candidate_service.py tests/contract/test_skill_candidate_lifecycle.py tests/integration/test_distill_cli.py -q</code></pre>
+
+      <h3>8.2 手动生成候选 Skill</h3>
+      <pre><code>uv run python -c "from src.skill_bridge.candidate import SkillCandidateStore; from src.skill_bridge.generator import SkillCandidateGenerator; store=SkillCandidateStore(); gen=SkillCandidateGenerator(store, output_root='experiments/outputs/skill_candidates'); candidate=gen.from_notebook('tests/fixtures/notebooks/skill_source.ipynb'); print(candidate)"</code></pre>
+      <p>预期生成：</p>
+      <pre><code>experiments/outputs/skill_candidates/candidate/SKILL.md</code></pre>
+
+      <h3>8.3 Skill 优化</h3>
+      <p><code>SkillOptimizer</code> 已实现备份、候选路径、旧新对比结果结构和审核状态，但真实 darwin-skill 调用与 CLI <code>/skill_opt</code> 产品入口仍需继续产品化。</p>
+      <pre><code>uv run pytest tests/contract/test_skill_optimization.py -q</code></pre>
+    </section>
+
+    <section id="memory">
+      <h2>9. 记忆与 Dream</h2>
+      <h3>9.1 记忆服务</h3>
+      <p>当前包含 semantic memory 服务边界、episodic storage、metadata index 和 memory-skill linker。建议先跑契约测试：</p>
+      <pre><code>uv run pytest tests/contract/test_storage_contracts.py tests/contract/test_memory_skill_bridge.py -q</code></pre>
+
+      <h3>9.2 Dream 空闲机制</h3>
+      <p>Dream 触发条件：</p>
+      <ul>
+        <li>距离最后用户指令超过 7200 秒。</li>
+        <li>当前没有活跃 run。</li>
+        <li>当前没有活跃 skill optimization。</li>
+        <li>成功获取 dream lease。</li>
+      </ul>
+      <pre><code>uv run pytest tests/contract/test_dream_memory.py tests/contract/test_scheduler_lease.py -q</code></pre>
+      <div class="note">
+        当前 Dream 只实现启动判定和 job 结构，尚未实现完整的记忆去重、提炼、总结与复盘执行器。
+      </div>
+    </section>
+
+    <section id="research">
+      <h2>10. 调研功能</h2>
+      <p>项目内 <code>MuyuSearchClient</code> 已作为边界存在，但当前默认实现返回 <code>unavailable</code>，表示本项目尚未连接真实 <code>/Users/zhongxianyu/Desktop/muyu-search-mcp</code> 工作流。</p>
+      <pre><code>uv run python -c "from src.research.muyu_client import MuyuSearchClient; print(MuyuSearchClient().research_target('https://github.com/example/project'))"</code></pre>
+      <p>预期包含：</p>
+      <pre><code>'status': 'unavailable'</code></pre>
+      <p>契约测试：</p>
+      <pre><code>uv run pytest tests/contract/test_research_integration.py -q</code></pre>
+    </section>
+
+    <section id="frontend">
+      <h2>11. 前端服务接口</h2>
+      <h3>11.1 当前形态</h3>
+      <p>当前不是一个真实 HTTP server，而是 <code>ApiRouter</code> 路由契约，供后续 FastAPI/Streamlit/前端层对接。</p>
+
+      <h3>11.2 可用路由契约</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>方法</th>
+            <th>路径</th>
+            <th>用途</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>POST</td><td><code>/api/conversations</code></td><td>创建会话</td></tr>
+          <tr><td>POST</td><td><code>/api/conversations/{session_id}/turns</code></td><td>提交一轮用户输入</td></tr>
+          <tr><td>GET</td><td><code>/api/conversations/{session_id}/stream</code></td><td>SSE 形式 ask streaming</td></tr>
+          <tr><td>GET</td><td><code>/api/runs/{experiment_id}</code></td><td>查询 run 状态</td></tr>
+          <tr><td>GET</td><td><code>/api/runs/{experiment_id}/rounds</code></td><td>查询轮次 trace</td></tr>
+          <tr><td>POST</td><td><code>/api/runs/{experiment_id}/stop</code></td><td>停止 run</td></tr>
+          <tr><td>GET</td><td><code>/api/memory/search</code></td><td>搜索记忆</td></tr>
+        </tbody>
+      </table>
+
+      <h3>11.3 跑接口契约测试</h3>
+      <pre><code>uv run pytest tests/contract/test_http_api_contract.py -q</code></pre>
+    </section>
+
+    <section id="safety">
+      <h2>12. 安全钩子</h2>
+      <p>本项目包含命令和写路径安全钩子，训练 runner 会先经过安全校验。</p>
+      <h3>12.1 验证禁止危险命令</h3>
+      <pre><code>uv run pytest tests/contract/test_safety_hooks.py tests/integration/test_safety_runner_gate.py -q</code></pre>
+      <p>预期：</p>
+      <ul>
+        <li><code>rm -rf</code> 类命令被阻断。</li>
+        <li>允许的 Python module 执行可以到达 runner executor。</li>
+      </ul>
+    </section>
+
+    <section id="fulltest">
+      <h2>13. 全量测试</h2>
+      <h3>13.1 运行全量测试</h3>
+      <pre><code>uv run pytest -q</code></pre>
+      <p>当前最近一次验证结果：</p>
+      <pre><code>142 passed</code></pre>
+
+      <h3>13.2 推荐分组测试顺序</h3>
+      <ol>
+        <li>LLM 配置真实请求。</li>
+        <li><code>status</code> 入口。</li>
+        <li>交互 shell <code>/ask</code>。</li>
+        <li><code>intake</code> train-only。</li>
+        <li><code>intake</code> random split。</li>
+        <li><code>explore</code> 1 轮。</li>
+        <li><code>explore</code> 多轮。</li>
+        <li>Skill 复现服务层测试。</li>
+        <li>SkillCandidate 生成测试。</li>
+        <li>Memory / Dream / Safety / API contract 测试。</li>
+      </ol>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>14. 常见问题</h2>
+      <h3>14.1 提示 LLM provider is not configured</h3>
+      <p>检查 <code>.env</code> 是否包含：</p>
+      <pre><code>MLAGENT_LLM_PROVIDER_NAME=minimax
+MLAGENT_LLM_API_PROTOCOL=openai-completions
+MLAGENT_LLM_BASE_URL=https://api.minimaxi.com/v1
+MLAGENT_LLM_API_KEY_ENV=MINIMAX_API_KEY
+MINIMAX_API_KEY=你的key
+MLAGENT_LLM_MODEL=MiniMax-M2.7</code></pre>
+
+      <h3>14.2 MiniMax 返回 401</h3>
+      <p>在 OpenAI-compatible 模式下，当前项目使用 <code>Authorization: Bearer</code>。请确认：</p>
+      <ul>
+        <li><code>MLAGENT_LLM_API_PROTOCOL=openai-completions</code></li>
+        <li><code>MLAGENT_LLM_BASE_URL=https://api.minimaxi.com/v1</code></li>
+        <li><code>MINIMAX_API_KEY</code> 没有被截断。</li>
+      </ul>
+
+      <h3>14.3 MiniMax 返回内容带 think 标签</h3>
+      <p>当前客户端已过滤 <code>&lt;think&gt;...&lt;/think&gt;</code>。如果仍看到该标签，请确认运行的是最新代码并重新跑：</p>
+      <pre><code>uv run pytest tests/contract/test_foundation_contracts.py::test_llm_client_stream_strips_openai_reasoning_tags -q</code></pre>
+
+      <h3>14.4 <code>/train_type1</code> 在默认 shell 中不能真正执行</h3>
+      <p>这是当前产品化缺口：默认 shell 尚未装配 <code>RunService</code> 和 harness registry。请先用 one-shot CLI 的 <code>explore</code> 测真实训练链路，用 pytest 验证 <code>/train_type1</code> 路由。</p>
+
+      <h3>14.5 <code>reproduce</code> one-shot CLI 返回 2</h3>
+      <p>当前 main 的 <code>reproduce</code> 分支只在测试中通过 factory 注入执行器。真实复现请先用 <code>StrictSkillReproductionAdapter</code> 服务层 snippet 或对应 pytest。</p>
+
+      <h3>14.6 uv 缓存权限错误</h3>
+      <p>如果在 Codex 沙箱中看到 <code>Failed to initialize cache</code>，这是沙箱访问用户缓存目录的限制。普通终端中通常直接运行即可；Codex 内需要授权 <code>uv run</code>。</p>
+    </section>
+
+    <section id="checklist">
+      <h2>15. 验收清单</h2>
+      <div class="checklist">
+        <label><input type="checkbox"> <code>uv run python -m src.agent.main status</code> 退出码为 0。</label>
+        <label><input type="checkbox"> MiniMax 最小真实请求返回 <code>ok</code>。</label>
+        <label><input type="checkbox"> 交互 shell 可启动，<code>/ask</code> 能返回回答，<code>/exit</code> 能退出。</label>
+        <label><input type="checkbox"> <code>intake</code> train-only 生成 <code>manifest.json</code>、训练特征、训练标签和报告。</label>
+        <label><input type="checkbox"> <code>intake</code> random split 生成 test feature/label 文件。</label>
+        <label><input type="checkbox"> <code>explore --max-rounds 1</code> 生成 run summary、round trace、best config、metrics。</label>
+        <label><input type="checkbox"> <code>explore --max-rounds 6</code> 的 <code>rounds.jsonl</code> 中能看到多个探索方向。</label>
+        <label><input type="checkbox"> <code>/train_type1</code> 路由测试通过。</label>
+        <label><input type="checkbox"> Skill 复现服务层测试通过，并生成复现 summary/metrics。</label>
+        <label><input type="checkbox"> SkillCandidate 生成测试通过，并产生 <code>SKILL.md</code> 草稿。</label>
+        <label><input type="checkbox"> Memory、Dream、Research boundary、Safety hooks、Frontend API contract 测试通过。</label>
+        <label><input type="checkbox"> 全量测试 <code>uv run pytest -q</code> 通过。</label>
+      </div>
+      <p class="small">
+        建议把测试过程中遇到的失败命令、错误输出、期望行为记录下来，下一轮可以直接作为产品化修复任务。
+      </p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Local secrets and machine-specific agent configuration
+.env
+.mcp.json
+.codex/config.toml
+.claude/settings.local.json
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime assets
+db/
+db/chroma/
+experiments/data/
+experiments/standardized/
+experiments/models/
+experiments/outputs/
+
+# Build and editor artifacts
+build/
+dist/
+*.egg-info/
+.DS_Store
+.worktrees/
