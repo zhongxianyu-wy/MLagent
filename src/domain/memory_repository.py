@@ -57,9 +57,17 @@ class MemoryRepository:
         self,
         id_factory: Callable[[], str] | None = None,
         clock: Callable[[], str] | None = None,
+        max_file_bytes: int = MAX_FILE_BYTES,
+        max_repository_bytes: int = MAX_REPOSITORY_BYTES,
+        warning_ratio: float = 0.8,
+        remote_timeout_seconds: float = 5,
     ) -> None:
         self.id_factory = id_factory or (lambda: f"tmr-{uuid.uuid4()}")
         self.clock = clock or _utc_now
+        self.max_file_bytes = max_file_bytes
+        self.max_repository_bytes = max_repository_bytes
+        self.warning_ratio = warning_ratio
+        self.remote_timeout_seconds = remote_timeout_seconds
 
     def bootstrap(
         self,
@@ -73,6 +81,8 @@ class MemoryRepository:
 
         manifest_path = root / MANIFEST_PATH
         if manifest_path.exists():
+            if remote_url is not None:
+                self._configure_remote(root, remote_url)
             return self._open(root, actor_id=actor_id, git_state="existing")
 
         unexpected = [entry.name for entry in root.iterdir() if entry.name != ".git"]
@@ -108,6 +118,8 @@ class MemoryRepository:
             encoding="utf-8",
         )
         self._merge_ignore_rules(root)
+        if remote_url is not None:
+            self._configure_remote(root, remote_url)
         return self._open(root, actor_id=actor_id, git_state="initialized")
 
     def open(self, repository_path: Path, actor_id: str) -> RepositoryStatus:
@@ -134,6 +146,10 @@ class MemoryRepository:
             (root / managed_path).mkdir(parents=True, exist_ok=True)
         self._merge_ignore_rules(root)
 
+        remote = self._remote_status(root)
+        capacity = self._capacity_status(root)
+        issues = self._readiness_issues(remote, capacity)
+
         return RepositoryStatus(
             repository_id=manifest["repository_id"],
             schema_version=manifest["schema_version"],
@@ -141,14 +157,11 @@ class MemoryRepository:
             actor_id=actor_id,
             managed_paths=tuple(manifest["managed_paths"]),
             git_state=git_state,
-            remote=RemoteStatus(
-                state="not_configured",
-                url=None,
-                message="No origin remote configured.",
-            ),
-            capacity=self._capacity_status(root),
-            ready=True,
-            issues=(),
+            remote=remote,
+            capacity=capacity,
+            ready=(remote.state not in {"invalid", "unreachable"})
+            and capacity.state != "blocked",
+            issues=issues,
         )
 
     @staticmethod
@@ -266,8 +279,93 @@ class MemoryRepository:
             encoding="utf-8",
         )
 
+    def _configure_remote(self, root: Path, remote_url: str) -> None:
+        if remote_url.startswith(("http://", "https://")) or (
+            "://" in remote_url and not remote_url.startswith("ssh://")
+        ):
+            raise WorkspaceError(
+                code="remote_not_ssh",
+                message="Team Memory network remotes must use SSH.",
+                next_action="Configure an SSH remote and ensure the team SSH identity is available.",
+            )
+
+        existing = self._git_remote_url(root)
+        if existing is not None and existing != remote_url:
+            raise WorkspaceError(
+                code="remote_mismatch",
+                message=f"Origin remote is already configured as {existing}.",
+                next_action="Use the configured Team Memory remote or change it manually after team review.",
+            )
+        if existing is not None:
+            return
+
+        result = subprocess.run(
+            ["git", "remote", "add", "origin", remote_url],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise WorkspaceError(
+                code="remote_configuration_failed",
+                message=result.stderr.strip() or "Git origin could not be configured.",
+                next_action="Check the remote URL and repository permissions, then retry bootstrap-memory.",
+            )
+
+    def _remote_status(self, root: Path) -> RemoteStatus:
+        remote_url = self._git_remote_url(root)
+        if remote_url is None:
+            return RemoteStatus(
+                state="not_configured",
+                url=None,
+                message="No origin remote configured.",
+            )
+        if remote_url.startswith(("http://", "https://")):
+            return RemoteStatus(
+                state="invalid",
+                url=remote_url,
+                message="Origin is not an SSH remote.",
+            )
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", "origin"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.remote_timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return RemoteStatus(
+                state="unreachable",
+                url=remote_url,
+                message="Origin did not respond before the readiness timeout.",
+            )
+        if result.returncode == 0:
+            return RemoteStatus(
+                state="reachable",
+                url=remote_url,
+                message="Origin is reachable.",
+            )
+        return RemoteStatus(
+            state="unreachable",
+            url=remote_url,
+            message="Origin could not be reached with the current Git/SSH identity.",
+        )
+
     @staticmethod
-    def _capacity_status(root: Path) -> CapacityStatus:
+    def _git_remote_url(root: Path) -> str | None:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def _capacity_status(self, root: Path) -> CapacityStatus:
         sizes = [
             path.stat().st_size
             for path in root.rglob("*")
@@ -275,13 +373,73 @@ class MemoryRepository:
             and ".git" not in path.relative_to(root).parts
             and ".mlagent-local" not in path.relative_to(root).parts
         ]
+        bytes_used = sum(sizes)
+        largest_file_bytes = max(sizes, default=0)
+        if (
+            largest_file_bytes >= self.max_file_bytes
+            or bytes_used >= self.max_repository_bytes
+        ):
+            state = "blocked"
+        elif bytes_used >= int(self.max_repository_bytes * self.warning_ratio):
+            state = "warning"
+        else:
+            state = "ok"
         return CapacityStatus(
-            state="ok",
-            bytes_used=sum(sizes),
-            largest_file_bytes=max(sizes, default=0),
-            max_file_bytes=MAX_FILE_BYTES,
-            max_repository_bytes=MAX_REPOSITORY_BYTES,
+            state=state,
+            bytes_used=bytes_used,
+            largest_file_bytes=largest_file_bytes,
+            max_file_bytes=self.max_file_bytes,
+            max_repository_bytes=self.max_repository_bytes,
         )
+
+    @staticmethod
+    def _readiness_issues(
+        remote: RemoteStatus,
+        capacity: CapacityStatus,
+    ) -> tuple[WorkspaceIssue, ...]:
+        issues: list[WorkspaceIssue] = []
+        if remote.state == "invalid":
+            issues.append(
+                WorkspaceIssue(
+                    code="remote_not_ssh",
+                    message="The configured origin is not an SSH remote.",
+                    next_action="Configure an SSH remote before team synchronization.",
+                )
+            )
+        elif remote.state == "unreachable":
+            issues.append(
+                WorkspaceIssue(
+                    code="remote_unreachable",
+                    message="The configured origin is not reachable.",
+                    next_action="Check the remote path, SSH agent, access grants, and network, then retry.",
+                )
+            )
+
+        if capacity.largest_file_bytes >= capacity.max_file_bytes:
+            issues.append(
+                WorkspaceIssue(
+                    code="file_too_large",
+                    message="At least one managed file is at or above the single-file limit.",
+                    next_action="Remove or replace the oversized file before committing managed assets.",
+                )
+            )
+        if capacity.bytes_used >= capacity.max_repository_bytes:
+            issues.append(
+                WorkspaceIssue(
+                    code="repository_capacity_exceeded",
+                    message="The Team Memory Repository is at or above its capacity limit.",
+                    next_action="Archive approved historical assets before adding new large files.",
+                )
+            )
+        elif capacity.state == "warning":
+            issues.append(
+                WorkspaceIssue(
+                    code="repository_capacity_warning",
+                    message="The Team Memory Repository has reached its maintenance threshold.",
+                    next_action="Plan an archive review before the repository reaches its hard limit.",
+                )
+            )
+        return tuple(issues)
 
 
 def _utc_now() -> str:
