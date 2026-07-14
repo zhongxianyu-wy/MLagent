@@ -55,6 +55,101 @@ class IndexSummary:
 
 
 @dataclass(frozen=True)
+class InspectDatasetCommand:
+    feature_path: Path
+    label_path: Path
+    sample_id_col: str | None = None
+    label_col: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfirmDatasetCommand:
+    connection_path: Path
+    feature_path: Path
+    label_path: Path
+    sample_id_col: str
+    label_col: str
+    task_type: str
+    primary_metric: str
+    split_strategy: str
+    target_metric: float
+    positive_class: str | None = None
+    test_ratio: float | None = None
+    random_seed: int = 42
+    dataset_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DatasetPreview:
+    columns: tuple[str, ...]
+    rows: tuple[tuple[Any, ...], ...]
+    omitted_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class DatasetInspection:
+    status: str
+    feature_path: Path
+    label_path: Path
+    inferred_sample_id_col: str | None
+    inferred_label_col: str | None
+    inferred_task_type: str | None
+    class_labels: tuple[str, ...]
+    sample_count: int
+    feature_count: int
+    dtypes: dict[str, str]
+    missing_rates: dict[str, float]
+    class_distribution: dict[str, int]
+    preview: DatasetPreview
+    unresolved_fields: tuple[str, ...]
+    warnings: tuple[str, ...]
+    blockers: tuple[str, ...]
+    elapsed_ms: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class DatasetVersionSnapshot:
+    asset_id: str
+    asset_path: str
+    dataset_id: str
+    version: int
+    state: str
+    schema_version: int
+    created_at: str
+    created_by: str
+    content_fingerprint: str
+    version_fingerprint: str
+    source_files: tuple[dict[str, str], ...]
+    sample_id_col: str
+    label_col: str
+    task_type: str
+    class_labels: tuple[str, ...]
+    positive_class: str | None
+    primary_metric: str
+    target_metric: float
+    split_strategy: str
+    test_ratio: float | None
+    random_seed: int
+    sample_count: int
+    feature_count: int
+    dtypes: dict[str, str]
+    missing_rates: dict[str, float]
+    class_distribution: dict[str, int]
+    preview: DatasetPreview
+    warnings: tuple[str, ...]
+    files: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     repository_id: str
     schema_version: int
