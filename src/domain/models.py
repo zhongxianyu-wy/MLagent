@@ -144,6 +144,7 @@ class DatasetVersionSnapshot:
     preview: DatasetPreview
     warnings: tuple[str, ...]
     files: dict[str, str]
+    asset_type: str = "dataset_version"
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)

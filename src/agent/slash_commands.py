@@ -12,6 +12,7 @@ BUILTIN_MODES = {
 
 DOMAIN_ACTIONS = {
     "bootstrap-memory": "bootstrap_memory",
+    "intake-data": "intake_data",
     "intake": "intake",
     "explore": "explore",
     "reproduce": "reproduce",

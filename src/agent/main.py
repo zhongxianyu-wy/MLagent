@@ -22,6 +22,8 @@ def main(
         return shell()
     if args[0] == "bootstrap-memory":
         return _bootstrap_memory(args, domain_core_factory=domain_core_factory)
+    if args[0] == "intake-data":
+        return _intake_data(args, domain_core_factory=domain_core_factory)
     if args[0] == "status":
         return 0
     if args[0] == "intake":
@@ -189,6 +191,108 @@ def _bootstrap_memory(
 
     print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
     return 0 if snapshot.ready else 2
+
+
+def _intake_data(
+    args: list[str],
+    domain_core_factory: Callable[[], object] | None = None,
+) -> int:
+    from src.domain.core import DomainCore
+    from src.domain.models import (
+        ConfirmDatasetCommand,
+        InspectDatasetCommand,
+        WorkspaceError,
+    )
+
+    try:
+        if len(args) < 3 or args[1].startswith("--") or args[2].startswith("--"):
+            raise WorkspaceError(
+                code="missing_dataset_paths",
+                message="Feature and label CSV paths are required.",
+                next_action="Run intake-data <features.csv> <labels.csv> and review the pending confirmation.",
+            )
+        core = domain_core_factory() if domain_core_factory else DomainCore()
+        feature_path = Path(args[1])
+        label_path = Path(args[2])
+        if "--confirm" not in args:
+            result = core.inspect_dataset(
+                InspectDatasetCommand(
+                    feature_path=feature_path,
+                    label_path=label_path,
+                    sample_id_col=_option(args, "--sample-id", None),
+                    label_col=_option(args, "--label-column", None),
+                )
+            )
+        else:
+            required_options = {
+                "sample_id_col": _option(args, "--sample-id", None),
+                "label_col": _option(args, "--label-column", None),
+                "task_type": _option(args, "--task", None),
+                "primary_metric": _option(args, "--metric", None),
+                "split_strategy": _option(args, "--split-strategy", None),
+                "target_metric": _optional_float(args, "--target"),
+            }
+            missing = [
+                name
+                for name, value in required_options.items()
+                if value is None or (isinstance(value, str) and not value.strip())
+            ]
+            if missing:
+                raise WorkspaceError(
+                    code="missing_confirmation",
+                    message=f"Dataset confirmation fields are missing: {', '.join(missing)}",
+                    next_action="Confirm sample ID, label, task, metric, split, and target before creating a Dataset Version.",
+                )
+            random_seed = _optional_int(args, "--random-seed")
+            result = core.confirm_dataset(
+                ConfirmDatasetCommand(
+                    connection_path=Path(
+                        _option(
+                            args,
+                            "--workspace-config",
+                            ".mlagent-workspace.json",
+                        )
+                    ),
+                    feature_path=feature_path,
+                    label_path=label_path,
+                    sample_id_col=required_options["sample_id_col"],
+                    label_col=required_options["label_col"],
+                    task_type=required_options["task_type"],
+                    positive_class=_option(args, "--positive-class", None),
+                    primary_metric=required_options["primary_metric"],
+                    split_strategy=required_options["split_strategy"],
+                    target_metric=required_options["target_metric"],
+                    test_ratio=_optional_float(args, "--test-ratio"),
+                    random_seed=42 if random_seed is None else random_seed,
+                    dataset_id=_option(args, "--dataset-id", None),
+                )
+            )
+    except WorkspaceError as error:
+        print(
+            json.dumps(
+                {"status": "Failed", "error": error.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
+    except (TypeError, ValueError) as error:
+        problem = WorkspaceError(
+            code="invalid_arguments",
+            message=str(error),
+            next_action="Check intake-data arguments and retry.",
+        )
+        print(
+            json.dumps(
+                {"status": "Failed", "error": problem.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
+    return 2 if getattr(result, "status", None) == "Failed" else 0
 
 
 def _default_shell() -> int:

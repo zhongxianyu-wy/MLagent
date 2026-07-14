@@ -31,3 +31,13 @@ def test_parse_bootstrap_memory_routes_to_domain_core_workflow():
     assert parsed.name == "bootstrap-memory"
     assert parsed.domain_action == "bootstrap_memory"
     assert parsed.mode == "agent"
+
+
+def test_parse_intake_data_routes_to_authoritative_domain_workflow():
+    parsed = parse_slash_command(
+        "/intake-data features.csv labels.csv"
+    )
+
+    assert parsed.name == "intake-data"
+    assert parsed.domain_action == "intake_data"
+    assert parsed.mode == "agent"

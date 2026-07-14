@@ -5,11 +5,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from src.domain.dataset_intake import DatasetInspector
+from src.domain.dataset_repository import DatasetRepository
 from src.domain.local_index import LocalIndex
 from src.domain.memory_repository import MemoryRepository, RepositoryStatus
 from src.domain.models import (
     BootstrapMemoryCommand,
+    ConfirmDatasetCommand,
+    DatasetInspection,
+    DatasetVersionSnapshot,
     IndexSummary,
+    InspectDatasetCommand,
     WorkspaceConnection,
     WorkspaceError,
     WorkspaceSnapshot,
@@ -20,12 +26,16 @@ class DomainCore:
     def __init__(
         self,
         id_factory: Callable[[], str] | None = None,
+        dataset_id_factory: Callable[[], str] | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
+        self.dataset_id_factory = dataset_id_factory
+        self.clock = clock
         self.memory_repository = MemoryRepository(
             id_factory=id_factory,
             clock=clock,
         )
+        self.dataset_inspector = DatasetInspector()
 
     def bootstrap_memory(
         self,
@@ -69,6 +79,55 @@ class DomainCore:
             actor_id=connection.actor_id,
         )
         return LocalIndex(repository.repository_path).rebuild()
+
+    def inspect_dataset(
+        self,
+        command: InspectDatasetCommand,
+    ) -> DatasetInspection:
+        return self.dataset_inspector.inspect(command)
+
+    def confirm_dataset(
+        self,
+        command: ConfirmDatasetCommand,
+    ) -> DatasetVersionSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        normalized = self.dataset_inspector.normalize(command)
+        return DatasetRepository(
+            repository.repository_path,
+            id_factory=self.dataset_id_factory,
+            clock=self.clock,
+        ).create_version(
+            normalized,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+            dataset_id=command.dataset_id,
+        )
+
+    def get_dataset_overview(
+        self,
+        connection_path: Path,
+        dataset_id: str | None = None,
+        version: int | None = None,
+    ) -> DatasetVersionSnapshot | None:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        datasets = DatasetRepository(repository.repository_path)
+        if dataset_id is None:
+            if version is not None:
+                raise WorkspaceError(
+                    code="missing_dataset_id",
+                    message="A dataset ID is required when selecting a version.",
+                    next_action="Choose a Dataset Version from Dataset Overview.",
+                )
+            return datasets.latest()
+        return datasets.load(dataset_id, version)
 
     @staticmethod
     def _snapshot(
