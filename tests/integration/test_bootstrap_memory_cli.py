@@ -58,4 +58,3 @@ def test_bootstrap_memory_cli_requires_actor(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
     assert payload["error"]["code"] == "missing_actor"
-

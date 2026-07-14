@@ -39,6 +39,21 @@ def test_bootstrap_reports_reachable_local_git_remote(tmp_path):
     assert status.issues == ()
 
 
+def test_bootstrap_accepts_reachable_file_url_for_hermetic_remote(tmp_path):
+    remote_path = tmp_path / "team-memory.git"
+    init_bare_remote(remote_path)
+
+    status = manager().bootstrap(
+        tmp_path / "team-memory",
+        actor_id="alice",
+        remote_url=remote_path.as_uri(),
+    )
+
+    assert status.ready is True
+    assert status.remote.state == "reachable"
+    assert status.remote.url == remote_path.as_uri()
+
+
 def test_bootstrap_rejects_http_remote_before_credentials_can_be_persisted(tmp_path):
     with pytest.raises(WorkspaceError) as caught:
         manager().bootstrap(
@@ -49,6 +64,17 @@ def test_bootstrap_rejects_http_remote_before_credentials_can_be_persisted(tmp_p
 
     assert caught.value.code == "remote_not_ssh"
     assert "SSH" in caught.value.next_action
+
+
+def test_bootstrap_rejects_non_git_scp_network_identity(tmp_path):
+    with pytest.raises(WorkspaceError) as caught:
+        manager().bootstrap(
+            tmp_path / "team-memory",
+            actor_id="alice",
+            remote_url="other-user@example.com:team-memory.git",
+        )
+
+    assert caught.value.code == "remote_not_ssh"
 
 
 def test_bootstrap_reports_unreachable_ssh_remote_as_not_ready(tmp_path):

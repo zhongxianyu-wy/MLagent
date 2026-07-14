@@ -24,6 +24,29 @@ def bootstrap_repository(tmp_path):
             }
         )
     )
+    subprocess.run(
+        ["git", "add", "--", "experiences/experience-1/v1.json"],
+        cwd=repository_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=tester",
+            "-c",
+            "user.email=tester@mlagent.local",
+            "commit",
+            "-m",
+            "test: add experience asset",
+        ],
+        cwd=repository_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     return repository_path
 
 
@@ -50,6 +73,8 @@ def test_deleted_index_rebuilds_without_changing_authoritative_assets(tmp_path):
         "tmr-1",
         "experience-1",
     ]
+    assert index.list_assets()[1]["state"] == "pending"
+    assert "status" not in index.list_assets()[1]
 
 
 def test_corrupt_index_is_replaced_from_authoritative_assets(tmp_path):
@@ -77,3 +102,31 @@ def test_local_index_never_appears_in_git_status(tmp_path):
         check=True,
     )
     assert ".mlagent-local" not in result.stdout
+
+
+def test_local_index_ignores_untracked_and_modified_worktree_json(tmp_path):
+    repository_path = bootstrap_repository(tmp_path)
+    tracked_path = repository_path / "experiences/experience-1/v1.json"
+    tracked_payload = json.loads(tracked_path.read_text())
+    tracked_payload["asset_id"] = "tampered-in-worktree"
+    tracked_path.write_text(json.dumps(tracked_payload))
+    untracked_path = repository_path / "experiences/untracked/v1.json"
+    untracked_path.parent.mkdir(parents=True)
+    untracked_path.write_text(
+        json.dumps(
+            {
+                "asset_type": "experience",
+                "asset_id": "untracked",
+                "version": 1,
+                "status": "pending",
+            }
+        )
+    )
+
+    index = LocalIndex(repository_path)
+    index.rebuild()
+
+    assert [row["asset_id"] for row in index.list_assets()] == [
+        "tmr-1",
+        "experience-1",
+    ]

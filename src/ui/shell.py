@@ -80,4 +80,3 @@ def _format_bytes(value: int) -> str:
             return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
         amount /= 1000
     return f"{value} B"
-

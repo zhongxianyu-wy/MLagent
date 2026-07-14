@@ -97,12 +97,19 @@ class MemoryRepository:
         if initialized_git:
             self._initialize_git(root)
 
+        repository_id = self.id_factory()
+        if not isinstance(repository_id, str) or not repository_id.strip():
+            raise WorkspaceError(
+                code="invalid_repository_id",
+                message="The generated Team Memory Repository ID is empty or invalid.",
+                next_action="Retry with a repository ID generator that returns a stable non-empty string.",
+            )
         for managed_path in MANAGED_PATHS:
             (root / managed_path).mkdir(parents=True, exist_ok=True)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest = {
             "asset_type": "team_memory_repository",
-            "repository_id": self.id_factory(),
+            "repository_id": repository_id,
             "schema_version": SCHEMA_VERSION,
             "created_at": self.clock(),
             "created_by": actor_id,
@@ -118,6 +125,7 @@ class MemoryRepository:
             encoding="utf-8",
         )
         self._merge_ignore_rules(root)
+        self._commit_bootstrap(root, actor_id=actor_id)
         if remote_url is not None:
             self._configure_remote(root, remote_url)
         return self._open(root, actor_id=actor_id, git_state="initialized")
@@ -139,6 +147,7 @@ class MemoryRepository:
                 message=f"Team Memory Repository is not a Git worktree: {root}",
                 next_action="Run bootstrap-memory with an empty directory or restore the repository Git metadata.",
             )
+        self._validate_git_repository(root)
 
         manifest = self._load_manifest(root / MANIFEST_PATH)
         self._validate_manifest(manifest)
@@ -207,6 +216,79 @@ class MemoryRepository:
             )
 
     @staticmethod
+    def _commit_bootstrap(root: Path, actor_id: str) -> None:
+        staged = subprocess.run(
+            ["git", "add", "--", ".gitignore", str(MANIFEST_PATH)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if staged.returncode != 0:
+            raise WorkspaceError(
+                code="git_stage_failed",
+                message=staged.stderr.strip() or "Bootstrap assets could not be staged.",
+                next_action="Check Git repository permissions, then retry bootstrap-memory.",
+            )
+        committed = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"user.name={actor_id}",
+                "-c",
+                "user.email=mlagent@local",
+                "commit",
+                "-m",
+                "chore(memory): initialize team memory repository",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if committed.returncode != 0:
+            raise WorkspaceError(
+                code="git_commit_failed",
+                message=committed.stderr.strip() or "Bootstrap assets could not be committed.",
+                next_action="Check Git repository permissions and identity, then retry bootstrap-memory.",
+            )
+
+    @staticmethod
+    def _validate_git_repository(root: Path) -> None:
+        worktree = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        tracked_manifest = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(MANIFEST_PATH)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if (
+            worktree.returncode != 0
+            or Path(worktree.stdout.strip()).resolve() != root
+            or head.returncode != 0
+            or tracked_manifest.returncode != 0
+        ):
+            raise WorkspaceError(
+                code="invalid_repository",
+                message=f"Team Memory path is not a valid versioned Git repository: {root}",
+                next_action="Restore valid Git metadata and the committed Team Memory manifest, or bootstrap an empty directory.",
+            )
+
+    @staticmethod
     def _load_manifest(path: Path) -> dict[str, Any]:
         if not path.is_file():
             raise WorkspaceError(
@@ -239,11 +321,18 @@ class MemoryRepository:
             "created_at",
             "created_by",
             "managed_paths",
+            "limits",
         }
         if not required.issubset(manifest):
             raise WorkspaceError(
                 code="invalid_manifest",
                 message="Team Memory manifest is missing required fields.",
+                next_action="Restore the complete manifest from Git before reopening the workspace.",
+            )
+        if type(manifest["schema_version"]) is not int:
+            raise WorkspaceError(
+                code="invalid_manifest",
+                message="Manifest schema_version must be an integer.",
                 next_action="Restore the complete manifest from Git before reopening the workspace.",
             )
         if manifest["schema_version"] != SCHEMA_VERSION:
@@ -258,11 +347,40 @@ class MemoryRepository:
                 message="Manifest asset_type is not team_memory_repository.",
                 next_action="Restore the Team Memory manifest from Git.",
             )
-        if tuple(manifest["managed_paths"]) != MANAGED_PATHS:
+        if (
+            not isinstance(manifest["repository_id"], str)
+            or not manifest["repository_id"].strip()
+            or not isinstance(manifest["created_at"], str)
+            or not manifest["created_at"].strip()
+            or not isinstance(manifest["created_by"], str)
+            or not manifest["created_by"].strip()
+        ):
+            raise WorkspaceError(
+                code="invalid_manifest",
+                message="Manifest identity and audit fields must be non-empty strings.",
+                next_action="Restore the complete manifest from Git before reopening the workspace.",
+            )
+        if (
+            not isinstance(manifest["managed_paths"], list)
+            or not all(isinstance(path, str) for path in manifest["managed_paths"])
+            or tuple(manifest["managed_paths"]) != MANAGED_PATHS
+        ):
             raise WorkspaceError(
                 code="invalid_manifest",
                 message="Manifest managed_paths do not match schema version 1.",
                 next_action="Restore the schema version 1 managed path declaration from Git.",
+            )
+        limits = manifest["limits"]
+        if (
+            not isinstance(limits, dict)
+            or type(limits.get("max_file_bytes")) is not int
+            or type(limits.get("max_repository_bytes")) is not int
+            or not isinstance(limits.get("warning_ratio"), (int, float))
+        ):
+            raise WorkspaceError(
+                code="invalid_manifest",
+                message="Manifest capacity limits do not match schema version 1.",
+                next_action="Restore the complete manifest from Git before reopening the workspace.",
             )
 
     @staticmethod
@@ -280,9 +398,7 @@ class MemoryRepository:
         )
 
     def _configure_remote(self, root: Path, remote_url: str) -> None:
-        if remote_url.startswith(("http://", "https://")) or (
-            "://" in remote_url and not remote_url.startswith("ssh://")
-        ):
+        if not self._is_supported_remote(remote_url):
             raise WorkspaceError(
                 code="remote_not_ssh",
                 message="Team Memory network remotes must use SSH.",
@@ -321,7 +437,7 @@ class MemoryRepository:
                 url=None,
                 message="No origin remote configured.",
             )
-        if remote_url.startswith(("http://", "https://")):
+        if not self._is_supported_remote(remote_url):
             return RemoteStatus(
                 state="invalid",
                 url=remote_url,
@@ -364,6 +480,18 @@ class MemoryRepository:
             check=False,
         )
         return result.stdout.strip() if result.returncode == 0 else None
+
+    @staticmethod
+    def _is_supported_remote(remote_url: str) -> bool:
+        if remote_url.startswith("ssh://"):
+            return True
+        if remote_url.startswith("git@"):
+            return ":" in remote_url.removeprefix("git@")
+        if remote_url.startswith("file://"):
+            return True
+        if "://" in remote_url or ("@" in remote_url and ":" in remote_url):
+            return False
+        return True
 
     def _capacity_status(self, root: Path) -> CapacityStatus:
         sizes = [

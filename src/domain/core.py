@@ -31,13 +31,17 @@ class DomainCore:
         self,
         command: BootstrapMemoryCommand,
     ) -> WorkspaceSnapshot:
+        connection_path = (
+            command.connection_path or Path.cwd() / ".mlagent-workspace.json"
+        )
+        self._validate_connection_location(
+            command.repository_path,
+            connection_path,
+        )
         repository = self.memory_repository.bootstrap(
             command.repository_path,
             actor_id=command.actor_id,
             remote_url=command.remote_url,
-        )
-        connection_path = (
-            command.connection_path or Path.cwd() / ".mlagent-workspace.json"
         )
         self._write_connection(
             connection_path,
@@ -87,6 +91,24 @@ class DomainCore:
         )
 
     @staticmethod
+    def _validate_connection_location(
+        repository_path: Path,
+        connection_path: Path,
+    ) -> None:
+        root = repository_path.expanduser().resolve()
+        resolved_connection = connection_path.expanduser().resolve()
+        try:
+            relative = resolved_connection.relative_to(root)
+        except ValueError:
+            return
+        if relative != Path(".mlagent-workspace.json"):
+            raise WorkspaceError(
+                code="connection_inside_repository",
+                message="A local workspace connection cannot be an authoritative repository file.",
+                next_action="Store it outside the Team Memory Repository or use the ignored root .mlagent-workspace.json path.",
+            )
+
+    @staticmethod
     def _write_connection(
         connection_path: Path,
         connection: WorkspaceConnection,
@@ -124,4 +146,3 @@ class DomainCore:
             repository_path=Path(payload["repository_path"]),
             actor_id=payload["actor_id"],
         )
-

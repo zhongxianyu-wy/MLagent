@@ -1,7 +1,9 @@
 import json
 
+import pytest
+
 from src.domain.core import DomainCore
-from src.domain.models import BootstrapMemoryCommand
+from src.domain.models import BootstrapMemoryCommand, WorkspaceError
 
 
 def test_domain_core_bootstrap_writes_local_connection_and_builds_index(tmp_path):
@@ -52,3 +54,28 @@ def test_domain_core_reopens_connection_and_rebuilds_deleted_index(tmp_path):
     assert rebuilt.asset_count == 1
     assert rebuilt.index_path.is_file()
 
+
+def test_domain_core_rejects_visible_connection_file_inside_team_repository(
+    tmp_path,
+):
+    repository_path = tmp_path / "team-memory"
+    core = DomainCore()
+    core.bootstrap_memory(
+        BootstrapMemoryCommand(
+            repository_path=repository_path,
+            actor_id="alice",
+            connection_path=tmp_path / ".mlagent-workspace.json",
+        )
+    )
+
+    with pytest.raises(WorkspaceError) as caught:
+        core.bootstrap_memory(
+            BootstrapMemoryCommand(
+                repository_path=repository_path,
+                actor_id="alice",
+                connection_path=repository_path / "local-config.json",
+            )
+        )
+
+    assert caught.value.code == "connection_inside_repository"
+    assert not (repository_path / "local-config.json").exists()

@@ -1,4 +1,7 @@
 from pathlib import Path
+import os
+import subprocess
+import sys
 
 from streamlit.testing.v1 import AppTest
 
@@ -37,3 +40,29 @@ def test_streamlit_shell_renders_domain_core_workspace_context(tmp_path, monkeyp
         ("Writer", "alice"),
     ]
     assert app.subheader[0].value == "Code Review"
+
+
+def test_streamlit_script_resolves_project_package_when_run_as_entrypoint(
+    tmp_path,
+):
+    connection_path = tmp_path / ".mlagent-workspace.json"
+    DomainCore().bootstrap_memory(
+        BootstrapMemoryCommand(
+            repository_path=tmp_path / "team-memory",
+            actor_id="alice",
+            connection_path=connection_path,
+        )
+    )
+    environment = os.environ.copy()
+    environment["MLAGENT_WORKSPACE_CONFIG"] = str(connection_path)
+
+    result = subprocess.run(
+        [sys.executable, "src/ui/app.py"],
+        cwd=Path(__file__).resolve().parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

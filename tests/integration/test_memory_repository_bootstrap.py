@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 
 import pytest
 
@@ -33,6 +35,28 @@ def test_bootstrap_creates_and_reopens_authoritative_git_workspace(tmp_path):
     assert tuple(manifest["managed_paths"]) == MANAGED_PATHS
     assert all((repository_path / path).is_dir() for path in MANAGED_PATHS)
     assert (repository_path / ".mlagent/repository.json").read_bytes() == manifest_before
+    tracked = subprocess.run(
+        ["git", "ls-files"],
+        cwd=repository_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert tracked == [".gitignore", ".mlagent/repository.json"]
+    assert subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=repository_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).returncode == 0
+    assert subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repository_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout == ""
 
 
 def test_bootstrap_adds_local_and_credential_ignore_rules(tmp_path):
@@ -87,3 +111,47 @@ def test_open_refuses_unsupported_schema(tmp_path):
 
     assert caught.value.code == "unsupported_schema"
     assert "schema version 1" in caught.value.next_action
+
+
+def test_bootstrap_rejects_empty_repository_id_before_writing_manifest(tmp_path):
+    repository_path = tmp_path / "team-memory"
+    manager = MemoryRepository(
+        id_factory=lambda: "",
+        clock=lambda: "2026-07-14T00:00:00Z",
+    )
+
+    with pytest.raises(WorkspaceError) as caught:
+        manager.bootstrap(repository_path, actor_id="alice")
+
+    assert caught.value.code == "invalid_repository_id"
+    assert not (repository_path / ".mlagent/repository.json").exists()
+
+
+def test_open_refuses_directory_with_fake_git_metadata(tmp_path):
+    repository_path = tmp_path / "team-memory"
+    manager = repository_manager()
+    manager.bootstrap(repository_path, actor_id="alice")
+    shutil.rmtree(repository_path / ".git")
+    (repository_path / ".git").mkdir()
+
+    with pytest.raises(WorkspaceError) as caught:
+        manager.open(repository_path, actor_id="alice")
+
+    assert caught.value.code == "invalid_repository"
+    assert "Git metadata" in caught.value.next_action
+
+
+def test_open_wraps_type_invalid_manifest_as_actionable_error(tmp_path):
+    repository_path = tmp_path / "team-memory"
+    manager = repository_manager()
+    manager.bootstrap(repository_path, actor_id="alice")
+    manifest_path = repository_path / ".mlagent/repository.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["managed_paths"] = None
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(WorkspaceError) as caught:
+        manager.open(repository_path, actor_id="alice")
+
+    assert caught.value.code == "invalid_manifest"
+    assert "Restore" in caught.value.next_action

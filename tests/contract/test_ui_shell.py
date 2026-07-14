@@ -66,4 +66,3 @@ def test_shell_exposes_the_approved_global_status_vocabulary():
         "Pending sync",
         "Conflict",
     )
-

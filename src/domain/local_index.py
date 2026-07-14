@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,7 @@ class LocalIndex:
             rows = connection.execute(
                 """
                 SELECT path, content_sha256, asset_type, asset_id,
-                       version, status, created_at
+                       version, state, created_at
                 FROM assets
                 ORDER BY path
                 """
@@ -58,7 +59,7 @@ class LocalIndex:
                         asset_type TEXT NOT NULL,
                         asset_id TEXT NOT NULL,
                         version TEXT,
-                        status TEXT,
+                        state TEXT,
                         created_at TEXT
                     );
                     """
@@ -67,7 +68,7 @@ class LocalIndex:
                     """
                     INSERT INTO assets (
                         path, content_sha256, asset_type, asset_id,
-                        version, status, created_at
+                        version, state, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     assets,
@@ -76,55 +77,99 @@ class LocalIndex:
             connection.close()
         return len(assets)
 
-    def _asset_paths(self) -> list[Path]:
-        manifest_path = self.repository_path / MANIFEST_PATH
-        manifest = self._load_json(manifest_path)
+    def _asset_paths(self) -> list[str]:
+        manifest_relative = MANIFEST_PATH.as_posix()
+        manifest = self._load_json(
+            manifest_relative,
+            self._committed_bytes(manifest_relative),
+        )
         managed_paths = manifest.get("managed_paths")
-        if not isinstance(managed_paths, list):
+        if not isinstance(managed_paths, list) or not all(
+            isinstance(path, str) for path in managed_paths
+        ):
             raise WorkspaceError(
                 code="invalid_manifest",
                 message="Team Memory manifest does not declare managed_paths.",
                 next_action="Restore the repository manifest from Git before rebuilding the index.",
             )
 
-        paths = [manifest_path]
-        for managed_path in managed_paths:
-            root = self.repository_path / str(managed_path)
-            if root.is_dir():
-                paths.extend(root.rglob("*.json"))
-        return sorted(set(paths))
+        result = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                "HEAD",
+                "--",
+                manifest_relative,
+                *managed_paths,
+            ],
+            cwd=self.repository_path,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise WorkspaceError(
+                code="invalid_repository",
+                message="Committed Team Memory assets cannot be enumerated.",
+                next_action="Restore a valid Git HEAD before rebuilding the Local Index.",
+            )
+        return sorted(
+            path.decode("utf-8")
+            for path in result.stdout.split(b"\0")
+            if path and path.endswith(b".json")
+        )
 
-    def _read_asset(self, path: Path) -> tuple[str, str, str, str, str | None, str | None, str | None]:
-        raw = path.read_bytes()
-        payload = self._load_json(path, raw=raw)
-        is_manifest = path == self.repository_path / MANIFEST_PATH
+    def _read_asset(self, relative: str) -> tuple[str, str, str, str, str | None, str | None, str | None]:
+        raw = self._committed_bytes(relative)
+        payload = self._load_json(relative, raw)
+        is_manifest = relative == MANIFEST_PATH.as_posix()
         asset_type = payload.get("asset_type")
         asset_id = payload.get("repository_id") if is_manifest else payload.get("asset_id")
         version = payload.get("schema_version") if is_manifest else payload.get("version")
-        status = "active" if is_manifest else payload.get("status")
+        state = (
+            "active"
+            if is_manifest
+            else payload.get("state", payload.get("status"))
+        )
         created_at = payload.get("created_at")
         if not isinstance(asset_type, str) or not isinstance(asset_id, str):
-            relative = path.relative_to(self.repository_path)
             raise WorkspaceError(
                 code="invalid_asset",
                 message=f"Authoritative asset lacks asset_type or stable ID: {relative}",
                 next_action="Restore or correct the asset through the Domain Core before rebuilding the index.",
             )
         return (
-            str(path.relative_to(self.repository_path)),
+            relative,
             hashlib.sha256(raw).hexdigest(),
             asset_type,
             asset_id,
             None if version is None else str(version),
-            None if status is None else str(status),
+            None if state is None else str(state),
             None if created_at is None else str(created_at),
         )
 
+    def _committed_bytes(self, relative: str) -> bytes:
+        result = subprocess.run(
+            ["git", "show", f"HEAD:{relative}"],
+            cwd=self.repository_path,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise WorkspaceError(
+                code="invalid_repository",
+                message=f"Committed Team Memory asset cannot be read: {relative}",
+                next_action="Restore the committed asset from Git before rebuilding the Local Index.",
+            )
+        return result.stdout
+
     @staticmethod
-    def _load_json(path: Path, raw: bytes | None = None) -> dict[str, Any]:
+    def _load_json(path: str, raw: bytes) -> dict[str, Any]:
         try:
-            payload = json.loads((raw if raw is not None else path.read_bytes()).decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise WorkspaceError(
                 code="invalid_asset",
                 message=f"Authoritative JSON asset cannot be indexed: {path}",
