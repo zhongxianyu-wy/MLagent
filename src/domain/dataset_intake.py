@@ -28,6 +28,16 @@ TASK_METRICS = {
 }
 
 
+def dataset_semantic_fingerprint(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class NormalizedDataset:
     feature_bytes: bytes
@@ -220,13 +230,7 @@ class DatasetInspector:
             "test_ratio": command.test_ratio,
             "random_seed": command.random_seed,
         }
-        version_fingerprint = self._sha256(
-            json.dumps(
-                semantic_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
+        version_fingerprint = dataset_semantic_fingerprint(semantic_payload)
         feature_columns = [
             column for column in normalized_features.columns if column != sample_id_col
         ]
