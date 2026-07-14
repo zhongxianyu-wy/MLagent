@@ -21,3 +21,13 @@ def test_parse_agent_wrapped_functional_command():
 
 def test_parse_unknown_slash_command_returns_none():
     assert parse_slash_command("/unknown hello") is None
+
+
+def test_parse_bootstrap_memory_routes_to_domain_core_workflow():
+    parsed = parse_slash_command(
+        "/bootstrap-memory /tmp/team-memory --actor alice"
+    )
+
+    assert parsed.name == "bootstrap-memory"
+    assert parsed.domain_action == "bootstrap_memory"
+    assert parsed.mode == "agent"

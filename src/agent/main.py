@@ -14,11 +14,14 @@ def main(
     interact_factory: Callable[[dict], int] | None = None,
     distill_factory: Callable[[dict], int] | None = None,
     research_factory: Callable[[dict], int] | None = None,
+    domain_core_factory: Callable[[], object] | None = None,
 ) -> int:
     args = sys.argv[1:] if argv is None else argv
     if not args:
         shell = shell_factory or _default_shell
         return shell()
+    if args[0] == "bootstrap-memory":
+        return _bootstrap_memory(args, domain_core_factory=domain_core_factory)
     if args[0] == "status":
         return 0
     if args[0] == "intake":
@@ -123,6 +126,69 @@ def _optional_float(args: list[str], name: str) -> float | None:
 def _optional_int(args: list[str], name: str) -> int | None:
     value = _option(args, name, None)
     return None if value is None else int(value)
+
+
+def _bootstrap_memory(
+    args: list[str],
+    domain_core_factory: Callable[[], object] | None = None,
+) -> int:
+    from src.domain.core import DomainCore
+    from src.domain.models import BootstrapMemoryCommand, WorkspaceError
+
+    try:
+        if len(args) < 2 or args[1].startswith("--"):
+            raise WorkspaceError(
+                code="missing_repository_path",
+                message="A Team Memory Repository path is required.",
+                next_action="Run bootstrap-memory <path> --actor <team-member>.",
+            )
+        actor_id = _option(args, "--actor", None)
+        if actor_id is None or not actor_id.strip():
+            raise WorkspaceError(
+                code="missing_actor",
+                message="A non-empty team member identity is required.",
+                next_action="Pass --actor with the identity used for repository audit records.",
+            )
+        connection_value = _option(
+            args,
+            "--workspace-config",
+            ".mlagent-workspace.json",
+        )
+        core = domain_core_factory() if domain_core_factory else DomainCore()
+        snapshot = core.bootstrap_memory(
+            BootstrapMemoryCommand(
+                repository_path=Path(args[1]),
+                actor_id=actor_id,
+                remote_url=_option(args, "--remote", None),
+                connection_path=Path(connection_value),
+            )
+        )
+    except WorkspaceError as error:
+        print(
+            json.dumps(
+                {"ready": False, "error": error.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
+    except (TypeError, ValueError) as error:
+        problem = WorkspaceError(
+            code="invalid_arguments",
+            message=str(error),
+            next_action="Check bootstrap-memory arguments and retry.",
+        )
+        print(
+            json.dumps(
+                {"ready": False, "error": problem.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    print(json.dumps(snapshot.to_dict(), ensure_ascii=False, sort_keys=True))
+    return 0 if snapshot.ready else 2
 
 
 def _default_shell() -> int:

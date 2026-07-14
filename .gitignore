@@ -3,6 +3,7 @@
 .mcp.json
 .codex/config.toml
 .claude/settings.local.json
+.mlagent-workspace.json
 
 # Python environments and caches
 .venv/
