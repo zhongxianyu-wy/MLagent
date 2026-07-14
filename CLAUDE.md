@@ -1,48 +1,64 @@
-# CLAUDE.md
+# MLagent v0.4
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-**MLagent_v3** is an NGS machine-learning experiment agent. The product vision is a local assistant that:
+**MLagent** is a Claude Code plugin for reproducible NGS machine-learning exploration. It:
 
 - Understands user-provided feature matrices and grouping labels
-- Standardizes inputs into a project dataset manifest
-- Explores feature engineering directions, especially feature subset selection
-- Reproduces approved training paradigms from Skills
-- Accumulates experiment experience, literature/project methods, and reusable Skills
+- Requires an approved exploration plan before training
+- Captures minimal, traceable training facts and reviewable expert experience
+- Turns only specified, reproduced training instances into versioned SOPs
+- Keeps approved SOP models and their optimization background traceable
+- Exposes code, data, runs, SOPs, experience, and lineage in a local Web UI
 
 The target user is a bioinformatics or computational biology researcher who wants an AI assistant to automate repeated ML exploration while preserving reusable experience.
 
 ## Project Status
 
-Early stage — no production code exists yet. Product, research, plan, and task materials are in `specs/`.
+v0.4 establishes the approved product and architecture baseline. Prototype code exists, but requirements
+newly introduced by the v0.4 PRD must not be described as implemented until their acceptance tests pass.
 
 ## Architecture Notes
 
-The architecture baseline is defined in `specs/plan.md` and `specs/research/06-架构基线决策.md`. Expected components include:
+The canonical product baseline is `specs/002-mlagent-plugin-memory-sop/prd.md`. The corresponding design
+decisions are in `docs/superpowers/specs/2026-07-14-mlagent-plugin-memory-sop-design.md`, `CONTEXT.md`,
+and `docs/adr/`. Older `specs/001-ngs-ml-agent/`, root plans, and research files are historical input.
 
-- **Data intake** — LLM-assisted file exploration plus Socratic clarification, producing a standard feature/label manifest
-- **Agent core** — Anthropic-compatible LLM planning and control
-- **Training loop** — k-fold training, threshold selection, test-set evaluation when available
-- **Memory system** — SQLite episodic traces, semantic knowledge, and Skill candidates
-- **Skill system** — `skill-creator` compliant Skills, optimized by darwin-skill before human review
-- **Research integration** — project-local muyu-search-mcp for literature and project investigation
+- **Claude Code plugin** — Skills and Hooks orchestrate workflows and human decision gates.
+- **Domain core** — deterministic services own data, runs, memory, SOP, models, and Git writes.
+- **Team memory repository** — structured Git assets are the sole source of truth.
+- **Local index** — derived, disposable, and rebuildable from authoritative assets.
+- **Training execution** — frozen data/code/config/environment/seed inputs produce traceable instances.
+- **Local Web UI** — six modules read and write only through domain services.
 
 ## MCP Servers
 
 Project-level MCP servers are configured in the project, not globally. Use the local muyu-search-mcp workflow from `/Users/zhongxianyu/Desktop/muyu-search-mcp` for research features.
 
+## Agent skills
+
+### Issue tracker
+
+Specs and implementation tickets live in GitHub Issues for `zhongxianyu-wy/MLagent`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository: read `CONTEXT.md` and relevant ADRs under `docs/adr/` before
+planning or implementation. See `docs/agents/domain.md`.
+
 <!-- SPECKIT START -->
 ## Spec Kit
 
-Canonical Spec Kit feature artifacts live in `specs/001-ngs-ml-agent/`:
-
-- `spec.md` — prioritized user stories and functional requirements
-- `plan.md` — implementation plan, architecture, and contracts
-- `tasks.md` — dependency-ordered task list
-- `data-model.md` — core entities and validation rules
-- `contracts/` — frontend/service and storage contracts
-
-Use these files as the source of truth before implementation. Root `specs/plan.md` and `specs/tasks.md` are synchronized copies for compatibility.
+The approved v0.4 requirements live in `specs/002-mlagent-plugin-memory-sop/prd.md`. Do not implement
+from `specs/001-ngs-ml-agent/`, root `specs/plan.md`, or root `specs/tasks.md` without first reconciling
+them with the v0.4 PRD. Matt Pocock specs and tracer-bullet tickets published to GitHub Issues become
+the implementation work queue after user approval.
 <!-- SPECKIT END -->

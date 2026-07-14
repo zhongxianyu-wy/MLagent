@@ -4,30 +4,32 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-**MLagent_v3** is an NGS machine-learning experiment agent. The product vision is a local assistant that:
+**MLagent** is a Claude Code plugin for reproducible NGS machine-learning exploration. It:
 
 - Understands user-provided feature matrices and grouping labels
-- Standardizes inputs into a project dataset manifest
-- Explores feature engineering directions, especially feature subset selection
-- Reproduces approved training paradigms from Skills
-- Accumulates experiment experience, literature/project methods, and reusable Skills
+- Requires an approved plan before training
+- Captures traceable training facts and reviewable expert experience
+- Produces versioned SOPs only from specified, independently reproduced training instances
+- Preserves approved SOP models and their optimization background
+- Provides a six-module local UI for code, data, runs, SOPs, experience, and lineage
 
 The target user is a bioinformatics or computational biology researcher who wants an AI assistant to automate repeated ML exploration while preserving reusable experience.
 
 ## Project Status
 
-Early stage — no production code exists yet. Product, research, plan, and task materials are in `specs/`.
+v0.4 is the approved product and architecture baseline. Prototype code exists; new PRD requirements are
+not implemented until their acceptance tests pass.
 
 ## Architecture Notes
 
-The architecture baseline is defined in `specs/plan.md` and `specs/research/06-架构基线决策.md`. Expected components include:
+Read `CONTEXT.md`, relevant ADRs under `docs/adr/`, the v0.4 PRD, and the v0.4 design decisions before
+implementation. Older specs and root plans are historical input.
 
-- **Data intake** — LLM-assisted file exploration plus Socratic clarification, producing a standard feature/label manifest
-- **Agent core** — Anthropic-compatible LLM planning and control
-- **Training loop** — k-fold training, threshold selection, test-set evaluation when available
-- **Memory system** — SQLite episodic traces, semantic knowledge, and Skill candidates
-- **Skill system** — `skill-creator` compliant Skills, optimized by darwin-skill before human review
-- **Research integration** — project-local muyu-search-mcp for literature and project investigation
+- **Claude Code plugin** — workflow orchestration through Skills and Hooks.
+- **Domain core** — deterministic data, training, memory, SOP, model, and Git services.
+- **Team memory repository** — structured Git assets are the sole source of truth.
+- **Local index** — derived and rebuildable, never authoritative.
+- **Local Web UI** — reads and writes through domain services only.
 
 ## MCP Servers
 
@@ -36,15 +38,9 @@ Project-level MCP servers are configured in the project, not globally. Use the l
 <!-- SPECKIT START -->
 ## Spec Kit
 
-Canonical Spec Kit feature artifacts live in `specs/001-ngs-ml-agent/`:
-
-- `spec.md` — prioritized user stories and functional requirements
-- `plan.md` — implementation plan, architecture, and contracts
-- `tasks.md` — dependency-ordered task list
-- `data-model.md` — core entities and validation rules
-- `contracts/` — frontend/service and storage contracts
-
-Use these files as the source of truth before implementation. Root `specs/plan.md` and `specs/tasks.md` are synchronized copies for compatibility.
+Canonical v0.4 product requirements live in `specs/002-mlagent-plugin-memory-sop/prd.md`. The matching
+design baseline is `docs/superpowers/specs/2026-07-14-mlagent-plugin-memory-sop-design.md`. Do not use
+`specs/001-ngs-ml-agent/` or root plan/task copies as implementation authority without reconciliation.
 <!-- SPECKIT END -->
 
 <!-- SPECKIT START -->
