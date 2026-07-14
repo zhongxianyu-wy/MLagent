@@ -4,6 +4,8 @@
 >
 > Source: v0.4 PRD, domain context, and accepted ADRs
 >
+> GitHub Spec Issue: https://github.com/zhongxianyu-wy/MLagent/issues/1
+>
 > Scope: Binary and multiclass classification MVP
 
 ## Problem Statement
