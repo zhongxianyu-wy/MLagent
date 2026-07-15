@@ -158,6 +158,152 @@ class ConfirmedDatasetReference:
 
 
 @dataclass(frozen=True)
+class ExplorationRound:
+    round_number: int
+    hypothesis: str
+    optimization_direction: str
+    intended_changes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CandidateCodeFile:
+    path: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class RecordExplorationPlanCommand:
+    connection_path: Path
+    code_root: Path
+    dataset_id: str
+    dataset_version: int
+    plan_id: str
+    planning_session_id: str
+    user_direction: str
+    baseline_hypothesis: str
+    rounds: tuple[ExplorationRound, ...]
+    stop_conditions: tuple[str, ...]
+    resource_limits: dict[str, str | int | float]
+    trusted_experience_ids: tuple[str, ...] = ()
+    pending_experience_ids: tuple[str, ...] = ()
+    excluded_pending_experience_ids: tuple[str, ...] = ()
+    candidate_code_paths: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ApproveExplorationPlanCommand:
+    connection_path: Path
+    code_root: Path
+    plan_id: str
+
+
+@dataclass(frozen=True)
+class AuthorizeTrainingCommand:
+    connection_path: Path
+    code_root: Path
+    entry_point: str
+    dataset_id: str
+    dataset_version: int
+    plan_id: str | None
+    approval_id: str | None
+
+
+@dataclass(frozen=True)
+class ExplorationPlanSnapshot:
+    asset_id: str
+    asset_path: str
+    plan_id: str
+    planning_session_id: str
+    dataset_id: str
+    dataset_version: int
+    dataset_content_fingerprint: str
+    dataset_version_fingerprint: str
+    user_direction: str
+    baseline_hypothesis: str
+    rounds: tuple[ExplorationRound, ...]
+    primary_metric: str
+    target_metric: float
+    stop_conditions: tuple[str, ...]
+    resource_limits: dict[str, str | int | float]
+    trusted_experience_ids: tuple[str, ...]
+    pending_experience_ids: tuple[str, ...]
+    excluded_pending_experience_ids: tuple[str, ...]
+    candidate_code_files: tuple[CandidateCodeFile, ...]
+    code_fingerprint: str
+    plan_fingerprint: str
+    state: str
+    created_at: str
+    created_by: str
+    asset_type: str = "exploration_plan_event"
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExplorationApprovalSnapshot:
+    asset_id: str
+    asset_path: str
+    plan_id: str
+    plan_event_id: str
+    dataset_id: str
+    dataset_version: int
+    dataset_version_fingerprint: str
+    plan_fingerprint: str
+    code_fingerprint: str
+    decision: str
+    created_at: str
+    created_by: str
+    asset_type: str = "exploration_plan_approval"
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class CandidateCodePreview:
+    path: str
+    content: str
+    recorded_sha256: str
+    current_sha256: str | None
+    state: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExplorationReviewSnapshot:
+    plan: ExplorationPlanSnapshot
+    approval: ExplorationApprovalSnapshot | None
+    approval_state: str
+    code_previews: tuple[CandidateCodePreview, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class TrainingAuthorization:
+    authorized: bool
+    entry_point: str
+    dataset_id: str
+    dataset_version: int
+    dataset_version_fingerprint: str
+    plan_id: str
+    plan_event_id: str
+    approval_id: str
+    plan_fingerprint: str
+    code_fingerprint: str
+    authorized_at: str
+    authorized_by: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     repository_id: str
     schema_version: int
