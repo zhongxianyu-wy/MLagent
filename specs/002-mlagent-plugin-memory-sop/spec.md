@@ -115,7 +115,7 @@ workflows, and edits will create new Code Revisions without hot-reloading a runn
 8. **Asset immutability:** committed Authoritative Assets are not edited in place. Corrections, approvals, rejections, and supersessions create new records or versions.
 9. **Dataset Version:** standardized features, labels, split, task, metric protocol, and content fingerprint form one immutable version. Changes to labels, split, or standardized content create another version.
 10. **Task boundary:** v0.4 supports binary and multiclass classification only. Task type, labels, positive class where relevant, metric, split, target, and stop rules require user confirmation.
-11. **Plan gate:** formal training commands require an approved Exploration Plan version. The guard applies consistently through Claude Code, CLI, and UI.
+11. **Plan gate:** formal training commands require an explicitly approved Exploration Plan record whose current plan and candidate-code fingerprints still match the approval. Exploration Plans are ordinary workflow records, not reusable immutable SOP-style versions. The guard applies consistently through Claude Code, CLI, and UI.
 12. **Training execution:** each Training Instance freezes Dataset Version, Code Revision, configuration, environment, split, seed, parent instance, and evaluation protocol before execution.
 13. **Run retention:** metrics, predictions, errors, and model fingerprints remain traceable for every instance. Only baseline, stage-best, human-marked, and SOP-related model artifacts are retained by default.
 14. **Minimal Raw Record:** full conversations, unrelated tool output, and complete stdout/stderr are excluded by default. Only evidence needed for reproduction, explanation, failure analysis, or human decisions is retained.
