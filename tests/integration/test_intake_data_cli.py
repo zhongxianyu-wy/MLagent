@@ -6,7 +6,13 @@ import pytest
 
 from src.agent.main import main
 from src.domain.core import DomainCore
-from src.domain.models import BootstrapMemoryCommand, ConfirmDatasetCommand
+from src.domain.models import (
+    ApproveExplorationPlanCommand,
+    BootstrapMemoryCommand,
+    ConfirmDatasetCommand,
+    ExplorationRound,
+    RecordExplorationPlanCommand,
+)
 
 
 def write_pair(root: Path):
@@ -31,6 +37,8 @@ def configured_core(tmp_path):
     core = DomainCore(
         id_factory=lambda: "tmr-1",
         dataset_id_factory=lambda: "ds-1",
+        exploration_event_id_factory=lambda: "plan-event-1",
+        exploration_approval_id_factory=lambda: "approval-1",
         clock=lambda: "2026-07-14T00:00:00Z",
     )
     connection_path = tmp_path / ".mlagent-workspace.json"
@@ -212,7 +220,9 @@ def test_authoritative_explore_is_blocked_until_dataset_version_is_confirmed(
     assert requests == []
 
 
-def test_authoritative_explore_accepts_confirmed_dataset_version(tmp_path):
+def test_authoritative_explore_accepts_approved_plan_for_confirmed_dataset(
+    tmp_path,
+):
     core, connection_path = configured_core(tmp_path)
     feature_path, label_path = write_pair(tmp_path)
     confirmed = core.confirm_dataset(
@@ -229,6 +239,39 @@ def test_authoritative_explore_accepts_confirmed_dataset_version(tmp_path):
             target_metric=0.9,
         )
     )
+    code_root = tmp_path / "code"
+    code_root.mkdir()
+    (code_root / "train.py").write_text("print('baseline')\n", encoding="utf-8")
+    plan = core.record_exploration_plan(
+        RecordExplorationPlanCommand(
+            connection_path=connection_path,
+            code_root=code_root,
+            dataset_id=confirmed.dataset_id,
+            dataset_version=confirmed.version,
+            plan_id="plan-1",
+            planning_session_id="session-1",
+            user_direction="Fit a reviewed baseline",
+            baseline_hypothesis="A regularized baseline is stable",
+            rounds=(
+                ExplorationRound(
+                    round_number=1,
+                    hypothesis="The baseline is stable",
+                    optimization_direction="baseline",
+                    intended_changes=("fit logistic regression",),
+                ),
+            ),
+            stop_conditions=("target reached",),
+            resource_limits={"max_minutes": 30},
+            candidate_code_paths=("train.py",),
+        )
+    )
+    approval = core.approve_exploration_plan(
+        ApproveExplorationPlanCommand(
+            connection_path=connection_path,
+            code_root=code_root,
+            plan_id=plan.plan_id,
+        )
+    )
     requests = []
 
     exit_code = main(
@@ -240,6 +283,12 @@ def test_authoritative_explore_accepts_confirmed_dataset_version(tmp_path):
             str(confirmed.version),
             "--workspace-config",
             str(connection_path),
+            "--plan-id",
+            plan.plan_id,
+            "--approval-id",
+            approval.asset_id,
+            "--code-root",
+            str(code_root),
         ],
         explore_factory=lambda request: requests.append(request) or 0,
         domain_core_factory=lambda: core,
@@ -257,6 +306,8 @@ def test_authoritative_explore_accepts_confirmed_dataset_version(tmp_path):
         == confirmed.version_fingerprint
     )
     assert requests[0]["experiment_id"] == "explore-ds-1-v0001"
+    assert requests[0]["authorization"]["plan_event_id"] == plan.asset_id
+    assert requests[0]["authorization"]["approval_id"] == approval.asset_id
     assert requests[0]["manifest_path"] == str(
         tmp_path
         / "team-memory"
@@ -349,7 +400,7 @@ def test_authoritative_explore_requires_approved_plan_before_training(
 
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 2
-    assert payload["error"]["code"] == "plan_required"
+    assert payload["error"]["code"] == "plan_approval_required"
     assert not output_root.exists()
 
 

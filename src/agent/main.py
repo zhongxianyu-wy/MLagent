@@ -24,6 +24,8 @@ def main(
         return _bootstrap_memory(args, domain_core_factory=domain_core_factory)
     if args[0] == "intake-data":
         return _intake_data(args, domain_core_factory=domain_core_factory)
+    if args[0] == "design-and-explore":
+        return _design_and_explore(args, domain_core_factory=domain_core_factory)
     if args[0] == "status":
         return 0
     if args[0] == "intake":
@@ -57,11 +59,18 @@ def main(
         if dataset_id is None:
             return 2
         authoritative_reference = None
+        authoritative_core = None
         if not legacy_manifest:
+            from src.domain.core import DomainCore
+
+            authoritative_core = (
+                domain_core_factory() if domain_core_factory else DomainCore()
+            )
             authoritative_reference = _guard_authoritative_dataset(
                 args,
                 dataset_id,
                 domain_core_factory=domain_core_factory,
+                domain_core=authoritative_core,
             )
             if authoritative_reference is None:
                 return 2
@@ -74,6 +83,14 @@ def main(
         }
         if authoritative_reference is not None:
             snapshot = authoritative_reference.snapshot
+            authorization = _guard_exploration_approval(
+                args,
+                dataset_id=dataset_id,
+                dataset_version=snapshot.version,
+                domain_core=authoritative_core,
+            )
+            if authorization is None:
+                return 2
             request.update(
                 {
                     "dataset_version": snapshot.version,
@@ -87,6 +104,7 @@ def main(
                         snapshot.primary_metric
                     ),
                     "random_seed": snapshot.random_seed,
+                    "authorization": authorization.to_dict(),
                 }
             )
         elif manifest_path is not None:
@@ -97,11 +115,10 @@ def main(
 
         if authoritative_reference is not None:
             _print_workspace_error(
-                code="plan_required",
-                message="Formal exploration requires an approved Exploration Plan.",
+                code="training_execution_not_implemented",
+                message="The approved exploration reached the Issue #5 execution seam.",
                 next_action=(
-                    "Create and approve an Exploration Plan before starting "
-                    "this Dataset Version."
+                    "Implement the governed Run and Training Instance executor in Issue #5."
                 ),
             )
             return 2
@@ -189,6 +206,7 @@ def _guard_authoritative_dataset(
     args: list[str],
     dataset_id: str,
     domain_core_factory: Callable[[], object] | None,
+    domain_core: object | None = None,
 ):
     from src.domain.core import DomainCore
     from src.domain.models import WorkspaceError
@@ -204,7 +222,9 @@ def _guard_authoritative_dataset(
                     "version number."
                 ),
             )
-        core = domain_core_factory() if domain_core_factory else DomainCore()
+        core = domain_core or (
+            domain_core_factory() if domain_core_factory else DomainCore()
+        )
         reference = core.require_confirmed_dataset_reference(
             Path(_option(args, "--workspace-config", ".mlagent-workspace.json")),
             dataset_id,
@@ -220,6 +240,44 @@ def _guard_authoritative_dataset(
         )
         return None
     return reference
+
+
+def _guard_exploration_approval(
+    args: list[str],
+    dataset_id: str,
+    dataset_version: int,
+    domain_core: object,
+):
+    from src.domain.models import AuthorizeTrainingCommand, WorkspaceError
+
+    try:
+        authorization = domain_core.authorize_training(
+            AuthorizeTrainingCommand(
+                connection_path=Path(
+                    _option(
+                        args,
+                        "--workspace-config",
+                        ".mlagent-workspace.json",
+                    )
+                ),
+                code_root=Path(_option(args, "--code-root", ".")),
+                entry_point="cli_explore",
+                dataset_id=dataset_id,
+                dataset_version=dataset_version,
+                plan_id=_option(args, "--plan-id", None),
+                approval_id=_option(args, "--approval-id", None),
+            )
+        )
+    except WorkspaceError as error:
+        print(
+            json.dumps(
+                {"status": "Failed", "error": error.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return None
+    return authorization
 
 
 def _training_metric_name(primary_metric: str) -> str:
@@ -406,6 +464,167 @@ def _intake_data(
 
     print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
     return 2 if getattr(result, "status", None) == "Failed" else 0
+
+
+def _design_and_explore(
+    args: list[str],
+    domain_core_factory: Callable[[], object] | None = None,
+) -> int:
+    from src.domain.core import DomainCore
+    from src.domain.models import (
+        ApproveExplorationPlanCommand,
+        ExplorationRound,
+        RecordExplorationPlanCommand,
+        WorkspaceError,
+    )
+
+    try:
+        if len(args) < 2 or args[1] not in {"record", "approve"}:
+            raise WorkspaceError(
+                code="invalid_design_action",
+                message="design-and-explore requires record or approve.",
+                next_action="Record Claude's plan first, then approve it only after human review.",
+            )
+        core = domain_core_factory() if domain_core_factory else DomainCore()
+        connection_path = Path(
+            _option(args, "--workspace-config", ".mlagent-workspace.json")
+        )
+        code_root = Path(_required_option(args, "--code-root"))
+        if args[1] == "approve":
+            result = core.approve_exploration_plan(
+                ApproveExplorationPlanCommand(
+                    connection_path=connection_path,
+                    code_root=code_root,
+                    plan_id=_required_option(args, "--plan-id"),
+                )
+            )
+        else:
+            plan = _load_exploration_plan_file(
+                Path(_required_option(args, "--plan-file"))
+            )
+            result = core.record_exploration_plan(
+                RecordExplorationPlanCommand(
+                    connection_path=connection_path,
+                    code_root=code_root,
+                    dataset_id=_required_option(args, "--dataset-id"),
+                    dataset_version=int(
+                        _required_option(args, "--dataset-version")
+                    ),
+                    plan_id=plan["plan_id"],
+                    planning_session_id=plan["planning_session_id"],
+                    user_direction=plan["user_direction"],
+                    baseline_hypothesis=plan["baseline_hypothesis"],
+                    rounds=tuple(
+                        ExplorationRound(
+                            round_number=item["round_number"],
+                            hypothesis=item["hypothesis"],
+                            optimization_direction=item[
+                                "optimization_direction"
+                            ],
+                            intended_changes=tuple(item["intended_changes"]),
+                        )
+                        for item in plan["rounds"]
+                    ),
+                    stop_conditions=tuple(plan["stop_conditions"]),
+                    resource_limits=dict(plan["resource_limits"]),
+                    trusted_experience_ids=tuple(
+                        plan["trusted_experience_ids"]
+                    ),
+                    pending_experience_ids=tuple(
+                        plan["pending_experience_ids"]
+                    ),
+                    excluded_pending_experience_ids=tuple(
+                        plan["excluded_pending_experience_ids"]
+                    ),
+                    candidate_code_paths=tuple(plan["candidate_code_paths"]),
+                )
+            )
+    except WorkspaceError as error:
+        _print_workspace_error(error.code, error.message, error.next_action)
+        return 2
+    except (KeyError, TypeError, ValueError) as error:
+        problem = WorkspaceError(
+            code="invalid_plan_file",
+            message=f"Exploration plan JSON has invalid fields: {error}.",
+            next_action="Regenerate the structurally complete plan JSON and retry recording.",
+        )
+        _print_workspace_error(
+            problem.code,
+            problem.message,
+            problem.next_action,
+        )
+        return 2
+
+    print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _required_option(args: list[str], name: str) -> str:
+    from src.domain.models import WorkspaceError
+
+    value = _option(args, name, None)
+    if value is None or not value.strip():
+        raise WorkspaceError(
+            code="missing_argument",
+            message=f"Required argument is missing: {name}.",
+            next_action=f"Pass {name} with a non-empty value.",
+        )
+    return value
+
+
+def _load_exploration_plan_file(path: Path) -> dict:
+    from src.domain.models import WorkspaceError
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkspaceError(
+            code="invalid_plan_file",
+            message=f"Exploration plan JSON cannot be read: {path}.",
+            next_action="Write one UTF-8 JSON object containing the completed plan.",
+        ) from error
+    if not isinstance(payload, dict):
+        raise WorkspaceError(
+            code="invalid_plan_file",
+            message="Exploration plan JSON must be one object.",
+            next_action="Regenerate the completed plan as one JSON object.",
+        )
+    required = {
+        "plan_id",
+        "planning_session_id",
+        "user_direction",
+        "baseline_hypothesis",
+        "rounds",
+        "stop_conditions",
+        "resource_limits",
+        "trusted_experience_ids",
+        "pending_experience_ids",
+        "excluded_pending_experience_ids",
+        "candidate_code_paths",
+    }
+    if not required.issubset(payload):
+        missing = ", ".join(sorted(required - set(payload)))
+        raise WorkspaceError(
+            code="invalid_plan_file",
+            message=f"Exploration plan JSON is missing fields: {missing}.",
+            next_action="Complete every review section before recording the plan.",
+        )
+    if not isinstance(payload["rounds"], list) or not all(
+        isinstance(item, dict)
+        and {
+            "round_number",
+            "hypothesis",
+            "optimization_direction",
+            "intended_changes",
+        }.issubset(item)
+        for item in payload["rounds"]
+    ):
+        raise WorkspaceError(
+            code="invalid_plan_file",
+            message="Exploration plan rounds have invalid structure.",
+            next_action="Give every round its number, hypothesis, direction, and intended changes.",
+        )
+    return payload
 
 
 def _default_shell() -> int:
