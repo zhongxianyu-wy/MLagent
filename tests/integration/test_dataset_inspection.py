@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -144,6 +145,156 @@ def test_ambiguous_columns_remain_unconfirmed_without_writing_facts(tmp_path):
         "label_col",
         "task_type",
     )
+    assert len(inspection.content_fingerprint) == 64
+
+
+def test_sample_ids_preserve_lexical_values_including_leading_zeroes_and_na(
+    tmp_path,
+):
+    feature_path, label_path = write_pair(
+        tmp_path,
+        pd.DataFrame(
+            {"sample_id": ["001", "002", "NA", "004"], "f1": [1, 2, 3, 4]}
+        ),
+        pd.DataFrame(
+            {
+                "sample_id": ["001", "002", "NA", "004"],
+                "group": ["case", "case", "control", "control"],
+            }
+        ),
+    )
+
+    inspection = DatasetInspector().inspect(
+        InspectDatasetCommand(feature_path=feature_path, label_path=label_path)
+    )
+    normalized = DatasetInspector().normalize(
+        confirmation(feature_path, label_path)
+    )
+
+    assert inspection.blockers == ()
+    assert [row[0] for row in inspection.preview.rows] == ["001", "002", "NA", "004"]
+    assert normalized.feature_bytes.decode().splitlines()[1:] == [
+        "001,1",
+        "002,2",
+        "NA,3",
+        "004,4",
+    ]
+
+
+def test_fallback_custom_label_column_preserves_lexical_classes(tmp_path):
+    feature_path, label_path = write_pair(
+        tmp_path,
+        pd.DataFrame(
+            {"sample_id": ["s1", "s2", "s3", "s4"], "f1": [1, 2, 3, 4]}
+        ),
+        pd.DataFrame(
+            {
+                "sample_id": ["s1", "s2", "s3", "s4"],
+                "diagnosis": ["01", "01", "NA", "NA"],
+            }
+        ),
+    )
+
+    inspection = DatasetInspector().inspect(
+        InspectDatasetCommand(feature_path=feature_path, label_path=label_path)
+    )
+    normalized = DatasetInspector().normalize(
+        confirmation(
+            feature_path,
+            label_path,
+            label_col="diagnosis",
+            positive_class="01",
+        )
+    )
+
+    assert inspection.inferred_label_col == "diagnosis"
+    assert inspection.class_labels == ("01", "NA")
+    assert inspection.blockers == ()
+    assert normalized.class_labels == ("01", "NA")
+
+
+def test_ids_that_collide_after_whitespace_normalization_are_rejected(tmp_path):
+    feature_path, label_path = write_pair(
+        tmp_path,
+        pd.DataFrame({"sample_id": ["s1", " s1 "], "f1": [1, 2]}),
+        pd.DataFrame(
+            {"sample_id": ["s1", "s2"], "group": ["case", "control"]}
+        ),
+    )
+
+    inspection = DatasetInspector().inspect(
+        InspectDatasetCommand(feature_path=feature_path, label_path=label_path)
+    )
+
+    assert inspection.status == "Failed"
+    assert "duplicate_feature_sample_id" in inspection.blockers
+
+
+def test_confirmation_uses_one_source_snapshot_when_file_changes_mid_read(
+    tmp_path,
+    monkeypatch,
+):
+    feature_path, label_path = write_pair(
+        tmp_path,
+        pd.DataFrame(
+            {"sample_id": ["s1", "s2", "s3", "s4"], "f1": [1, 2, 3, 4]}
+        ),
+        pd.DataFrame(
+            {
+                "sample_id": ["s1", "s2", "s3", "s4"],
+                "group": ["case", "case", "control", "control"],
+            }
+        ),
+    )
+    original_bytes = feature_path.read_bytes()
+    real_read_csv = pd.read_csv
+    calls = 0
+
+    def mutate_after_first_parse(source, *args, **kwargs):
+        nonlocal calls
+        frame = real_read_csv(source, *args, **kwargs)
+        calls += 1
+        if calls == 1:
+            feature_path.write_text(
+                "sample_id,f1\ns1,1\ns1,2\ns3,3\ns4,4\n",
+                encoding="utf-8",
+            )
+        return frame
+
+    monkeypatch.setattr(pd, "read_csv", mutate_after_first_parse)
+
+    normalized = DatasetInspector().normalize(
+        confirmation(feature_path, label_path)
+    )
+
+    assert normalized.sample_count == 4
+    assert normalized.feature_bytes.decode().splitlines()[1:] == [
+        "s1,1",
+        "s2,2",
+        "s3,3",
+        "s4,4",
+    ]
+    assert normalized.source_files[0]["sha256"] == hashlib.sha256(
+        original_bytes
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("blank_label", ["", "   "])
+def test_blank_labels_are_rejected(tmp_path, blank_label):
+    feature_path, label_path = write_pair(
+        tmp_path,
+        pd.DataFrame({"sample_id": ["s1", "s2"], "f1": [1, 2]}),
+        pd.DataFrame(
+            {"sample_id": ["s1", "s2"], "group": ["case", blank_label]}
+        ),
+    )
+
+    inspection = DatasetInspector().inspect(
+        InspectDatasetCommand(feature_path=feature_path, label_path=label_path)
+    )
+
+    assert inspection.status == "Failed"
+    assert "missing_label" in inspection.blockers
 
 
 @pytest.mark.parametrize(
@@ -257,6 +408,9 @@ def test_normalize_multiclass_data_uses_reproducible_stratified_split(tmp_path):
             {"split_strategy": "stratified_random", "test_ratio": None},
             "invalid_split",
         ),
+        ({"random_seed": None}, "invalid_random_seed"),
+        ({"random_seed": True}, "invalid_random_seed"),
+        ({"random_seed": -1}, "invalid_random_seed"),
     ],
 )
 def test_confirmation_rejects_invalid_classification_semantics(

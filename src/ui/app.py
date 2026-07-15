@@ -13,7 +13,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.domain.core import DomainCore
-from src.domain.models import DatasetVersionSnapshot, WorkspaceError
+from src.domain.models import (
+    DatasetInspection,
+    DatasetVersionSnapshot,
+    InspectDatasetCommand,
+    WorkspaceError,
+)
 from src.ui.shell import CONTEXT_LABELS, build_shell_state
 
 
@@ -37,7 +42,8 @@ def main() -> None:
         st.caption(error.next_action)
         return
 
-    shell = build_shell_state(snapshot, dataset)
+    inspection = st.session_state.get("dataset_inspection")
+    shell = build_shell_state(snapshot, dataset, inspection)
     with st.sidebar:
         st.title("MLagent")
         selected_module = st.radio(
@@ -60,17 +66,19 @@ def main() -> None:
     st.caption(shell.module_status[selected_module])
 
     if selected_module == "Dataset Overview":
-        _render_dataset_overview(shell.dataset)
+        _render_dataset_overview(core, shell.dataset, shell.inspection)
 
     for issue in shell.issues:
         st.warning(f"{issue['message']} {issue['next_action']}")
 
 
 def _render_dataset_overview(
+    core: DomainCore,
     dataset: DatasetVersionSnapshot | None,
+    inspection: DatasetInspection | None,
 ) -> None:
     if dataset is None:
-        st.info("No confirmed Dataset Version")
+        _render_dataset_inspection(core, inspection)
         return
 
     summary_columns = st.columns(4)
@@ -103,7 +111,7 @@ def _render_dataset_overview(
     st.dataframe(
         pd.DataFrame(preview_rows, columns=dataset.preview.columns),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     field_rows = [
@@ -117,14 +125,88 @@ def _render_dataset_overview(
     st.dataframe(
         pd.DataFrame(field_rows),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     st.dataframe(
         pd.DataFrame([dataset.class_distribution]),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     for warning in dataset.warnings:
+        st.warning(warning.replace("_", " ").capitalize())
+
+
+def _render_dataset_inspection(
+    core: DomainCore,
+    inspection: DatasetInspection | None,
+) -> None:
+    feature_path = st.text_input("Feature CSV", key="dataset_feature_path")
+    label_path = st.text_input("Label CSV", key="dataset_label_path")
+    if st.button("Inspect dataset", type="primary"):
+        try:
+            inspected = core.inspect_dataset(
+                InspectDatasetCommand(
+                    feature_path=Path(feature_path),
+                    label_path=Path(label_path),
+                )
+            )
+        except WorkspaceError as error:
+            st.error(error.message)
+            st.caption(error.next_action)
+        else:
+            st.session_state["dataset_inspection"] = inspected
+            st.rerun()
+
+    if inspection is None:
+        st.info("No dataset selected")
+        return
+
+    summary_columns = st.columns(4)
+    summary = (
+        ("Samples", str(inspection.sample_count)),
+        ("Features", str(inspection.feature_count)),
+        ("Task", inspection.inferred_task_type or "Pending confirmation"),
+        ("Label", inspection.inferred_label_col or "Pending confirmation"),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.caption(inspection.content_fingerprint)
+    if inspection.unresolved_fields:
+        st.warning(", ".join(inspection.unresolved_fields))
+
+    preview_rows = [list(row) for row in inspection.preview.rows]
+    if inspection.preview.omitted_count:
+        preview_rows.insert(
+            len(preview_rows) // 2,
+            ["..."] * len(inspection.preview.columns),
+        )
+    st.dataframe(
+        pd.DataFrame(preview_rows, columns=inspection.preview.columns),
+        hide_index=True,
+        width="stretch",
+    )
+    field_rows = [
+        {
+            "Field": field,
+            "Type": inspection.dtypes[field],
+            "Missing": inspection.missing_rates[field],
+        }
+        for field in inspection.dtypes
+    ]
+    st.dataframe(
+        pd.DataFrame(field_rows),
+        hide_index=True,
+        width="stretch",
+    )
+    st.dataframe(
+        pd.DataFrame([inspection.class_distribution]),
+        hide_index=True,
+        width="stretch",
+    )
+    for blocker in inspection.blockers:
+        st.error(blocker.replace("_", " ").capitalize())
+    for warning in inspection.warnings:
         st.warning(warning.replace("_", " ").capitalize())
 
 

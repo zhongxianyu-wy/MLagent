@@ -3,7 +3,7 @@ from pathlib import Path
 from src.agent.main import main
 
 
-def test_quickstart_cli_paths_are_callable(tmp_path):
+def test_quickstart_cli_paths_are_callable(tmp_path, confirmed_domain_core):
     standardized = tmp_path / "standardized"
     requests = []
 
@@ -16,12 +16,30 @@ def test_quickstart_cli_paths_are_callable(tmp_path):
         ]
     ) == 0
     assert main(
-        ["explore", "--dataset-id", "clear", "--max-rounds", "1"],
+        [
+            "explore",
+            "--dataset-id",
+            "ds-clear",
+            "--dataset-version",
+            "1",
+            "--max-rounds",
+            "1",
+        ],
         explore_factory=lambda request: requests.append(("explore", request)) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
     ) == 0
     assert main(
-        ["reproduce", "--skill-id", "ngs-xgboost-baseline", "--dataset-id", "clear"],
+        [
+            "reproduce",
+            "--skill-id",
+            "ngs-xgboost-baseline",
+            "--dataset-id",
+            "ds-clear",
+            "--dataset-version",
+            "1",
+        ],
         reproduce_factory=lambda request: requests.append(("reproduce", request)) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
     ) == 0
 
     assert Path(standardized / "clear" / "train_features.csv").exists()

@@ -24,6 +24,7 @@ def test_dataset_inspection_serializes_bounded_preview():
         status="Pending confirmation",
         feature_path=Path("features.csv"),
         label_path=Path("labels.csv"),
+        content_fingerprint="inspection-sha",
         inferred_sample_id_col="sample_id",
         inferred_label_col="group",
         inferred_task_type="binary",
@@ -54,6 +55,7 @@ def test_dataset_inspection_serializes_bounded_preview():
     ]
     assert payload["class_labels"] == ["case", "control"]
     assert payload["feature_path"] == "features.csv"
+    assert payload["content_fingerprint"] == "inspection-sha"
 
 
 def test_dataset_commands_and_version_snapshot_are_immutable_and_serializable():

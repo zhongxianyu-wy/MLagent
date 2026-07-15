@@ -3,7 +3,7 @@ from pathlib import Path
 from src.agent.main import main
 
 
-def test_product_cli_smoke_intake_then_explore(tmp_path):
+def test_product_cli_smoke_intake_then_explore(tmp_path, confirmed_domain_core):
     standardized = tmp_path / "standardized"
     outputs = tmp_path / "outputs"
 
@@ -29,7 +29,8 @@ def test_product_cli_smoke_intake_then_explore(tmp_path):
             "1",
             "--output-root",
             str(outputs),
-        ]
+        ],
+        domain_core_factory=lambda: confirmed_domain_core,
     ) == 0
 
     run_dir = outputs / "explore-clear"

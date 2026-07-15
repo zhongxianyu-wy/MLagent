@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from src.domain.models import DatasetVersionSnapshot, WorkspaceSnapshot
+from src.domain.models import (
+    DatasetInspection,
+    DatasetVersionSnapshot,
+    WorkspaceSnapshot,
+)
 
 
 NAVIGATION = (
@@ -44,11 +48,13 @@ class ShellState:
     capacity_text: str
     issues: tuple[dict[str, str], ...]
     dataset: DatasetVersionSnapshot | None
+    inspection: DatasetInspection | None
 
 
 def build_shell_state(
     snapshot: WorkspaceSnapshot,
     dataset: DatasetVersionSnapshot | None = None,
+    inspection: DatasetInspection | None = None,
 ) -> ShellState:
     git_status = {
         "reachable": "Success",
@@ -59,14 +65,20 @@ def build_shell_state(
     module_status = {module: "Not started" for module in NAVIGATION}
     if dataset is not None:
         module_status["Dataset Overview"] = "Success"
+    elif inspection is not None:
+        module_status["Dataset Overview"] = inspection.status
     return ShellState(
         navigation=NAVIGATION,
         context={
             "workspace": snapshot.repository_id,
             "dataset": (
-                "Not started"
-                if dataset is None
-                else f"{dataset.dataset_id} v{dataset.version}"
+                f"{dataset.dataset_id} v{dataset.version}"
+                if dataset is not None
+                else (
+                    inspection.status
+                    if inspection is not None
+                    else "Not started"
+                )
             ),
             "run": "Not started",
             "git": git_status,
@@ -81,6 +93,7 @@ def build_shell_state(
         ),
         issues=tuple(issue.to_dict() for issue in snapshot.issues),
         dataset=dataset,
+        inspection=inspection,
     )
 
 

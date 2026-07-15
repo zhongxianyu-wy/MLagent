@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import time
 from dataclasses import dataclass
@@ -26,16 +27,43 @@ TASK_METRICS = {
     "binary": {"roc_auc", "accuracy", "f1"},
     "multiclass": {"macro_f1", "accuracy", "roc_auc_ovr"},
 }
+DATASET_SEMANTIC_FIELDS = (
+    "content_fingerprint",
+    "split_fingerprint",
+    "source_files",
+    "sample_id_col",
+    "label_col",
+    "task_type",
+    "class_labels",
+    "positive_class",
+    "primary_metric",
+    "target_metric",
+    "split_strategy",
+    "test_ratio",
+    "random_seed",
+)
+MISSING_VALUE_TOKENS = {"na", "n/a", "nan", "null", "none"}
 
 
 def dataset_semantic_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = {field: payload[field] for field in DATASET_SEMANTIC_FIELDS}
     return hashlib.sha256(
         json.dumps(
-            payload,
+            canonical,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+@dataclass(frozen=True)
+class LoadedDatasetInputs:
+    feature_path: Path
+    label_path: Path
+    feature_bytes: bytes
+    label_bytes: bytes
+    features: pd.DataFrame
+    labels: pd.DataFrame
 
 
 @dataclass(frozen=True)
@@ -69,10 +97,22 @@ class NormalizedDataset:
 class DatasetInspector:
     def inspect(self, command: InspectDatasetCommand) -> DatasetInspection:
         started = time.perf_counter()
-        feature_path = self._validate_csv_path(command.feature_path, "features")
-        label_path = self._validate_csv_path(command.label_path, "labels")
-        features = self._read_csv(feature_path)
-        labels = self._read_csv(label_path)
+        loaded = self._load_inputs(
+            command.feature_path,
+            command.label_path,
+            sample_hint=command.sample_id_col,
+            label_hint=command.label_col,
+        )
+        return self._inspect_loaded(command, loaded, started)
+
+    def _inspect_loaded(
+        self,
+        command: InspectDatasetCommand,
+        loaded: LoadedDatasetInputs,
+        started: float,
+    ) -> DatasetInspection:
+        features = loaded.features
+        labels = loaded.labels
 
         sample_id_col = self._infer_sample_id_col(
             features,
@@ -113,8 +153,12 @@ class DatasetInspector:
         class_labels: tuple[str, ...] = ()
         class_distribution: dict[str, int] = {}
         task_type = None
-        if label_col is not None and label_col in labels and not labels[label_col].isna().any():
-            normalized_labels = labels[label_col].map(str)
+        if (
+            label_col is not None
+            and label_col in labels
+            and not self._has_missing_or_blank(labels[label_col])
+        ):
+            normalized_labels = self._normalized_text(labels[label_col])
             class_distribution = {
                 label: int(count)
                 for label, count in sorted(normalized_labels.value_counts().items())
@@ -147,8 +191,11 @@ class DatasetInspector:
 
         return DatasetInspection(
             status="Failed" if blockers else "Pending confirmation",
-            feature_path=feature_path,
-            label_path=label_path,
+            feature_path=loaded.feature_path,
+            label_path=loaded.label_path,
+            content_fingerprint=self._sha256(
+                loaded.feature_bytes + b"\0" + loaded.label_bytes
+            ),
             inferred_sample_id_col=sample_id_col,
             inferred_label_col=label_col,
             inferred_task_type=task_type,
@@ -166,14 +213,20 @@ class DatasetInspector:
         )
 
     def normalize(self, command: ConfirmDatasetCommand) -> NormalizedDataset:
-        inspection = self.inspect(
-            InspectDatasetCommand(
-                feature_path=command.feature_path,
-                label_path=command.label_path,
-                sample_id_col=command.sample_id_col,
-                label_col=command.label_col,
-            )
+        inspect_command = InspectDatasetCommand(
+            feature_path=command.feature_path,
+            label_path=command.label_path,
+            sample_id_col=command.sample_id_col,
+            label_col=command.label_col,
         )
+        started = time.perf_counter()
+        loaded = self._load_inputs(
+            command.feature_path,
+            command.label_path,
+            sample_hint=command.sample_id_col,
+            label_hint=command.label_col,
+        )
+        inspection = self._inspect_loaded(inspect_command, loaded, started)
         if inspection.blockers:
             self._raise_blocker(inspection.blockers[0])
         if inspection.inferred_sample_id_col != command.sample_id_col:
@@ -189,15 +242,13 @@ class DatasetInspector:
                 "Choose a label column from the inspection result.",
             )
 
-        feature_path = command.feature_path.expanduser().resolve()
-        label_path = command.label_path.expanduser().resolve()
-        features = self._read_csv(feature_path).copy()
-        labels = self._read_csv(label_path).copy()
+        features = loaded.features.copy()
+        labels = loaded.labels.copy()
         sample_id_col = command.sample_id_col
         label_col = command.label_col
         features[sample_id_col] = self._normalized_ids(features[sample_id_col])
         labels[sample_id_col] = self._normalized_ids(labels[sample_id_col])
-        labels[label_col] = labels[label_col].map(str)
+        labels[label_col] = self._normalized_text(labels[label_col])
         labels = labels.set_index(sample_id_col).loc[
             features[sample_id_col]
         ].reset_index()
@@ -216,9 +267,22 @@ class DatasetInspector:
             feature_bytes + b"\0" + label_bytes
         )
         split_fingerprint = self._sha256(split_bytes)
+        source_files = (
+            {
+                "role": "features",
+                "name": loaded.feature_path.name,
+                "sha256": self._sha256(loaded.feature_bytes),
+            },
+            {
+                "role": "labels",
+                "name": loaded.label_path.name,
+                "sha256": self._sha256(loaded.label_bytes),
+            },
+        )
         semantic_payload = {
             "content_fingerprint": content_fingerprint,
             "split_fingerprint": split_fingerprint,
+            "source_files": source_files,
             "sample_id_col": sample_id_col,
             "label_col": label_col,
             "task_type": command.task_type,
@@ -256,18 +320,7 @@ class DatasetInspector:
             content_fingerprint=content_fingerprint,
             split_fingerprint=split_fingerprint,
             version_fingerprint=version_fingerprint,
-            source_files=(
-                {
-                    "role": "features",
-                    "name": feature_path.name,
-                    "sha256": self._sha256(feature_path.read_bytes()),
-                },
-                {
-                    "role": "labels",
-                    "name": label_path.name,
-                    "sha256": self._sha256(label_path.read_bytes()),
-                },
-            ),
+            source_files=source_files,
             sample_id_col=sample_id_col,
             label_col=label_col,
             task_type=command.task_type,
@@ -298,24 +351,99 @@ class DatasetInspector:
             )
         return resolved
 
-    @staticmethod
-    def _read_csv(path: Path) -> pd.DataFrame:
+    def _load_inputs(
+        self,
+        feature_path: Path,
+        label_path: Path,
+        sample_hint: str | None,
+        label_hint: str | None,
+    ) -> LoadedDatasetInputs:
+        resolved_features = self._validate_csv_path(feature_path, "features")
+        resolved_labels = self._validate_csv_path(label_path, "labels")
         try:
-            with path.open("r", encoding="utf-8-sig", newline="") as handle:
-                header = next(csv.reader(handle))
+            feature_bytes = resolved_features.read_bytes()
+            label_bytes = resolved_labels.read_bytes()
+        except OSError as error:
+            raise WorkspaceError(
+                code="invalid_dataset_file",
+                message="Dataset input bytes cannot be read.",
+                next_action="Check file permissions and retry intake-data.",
+            ) from error
+        feature_protected = (*SAMPLE_ID_NAMES, sample_hint)
+        label_protected = (
+            *SAMPLE_ID_NAMES,
+            *LABEL_NAMES,
+            sample_hint,
+            label_hint,
+        )
+        return LoadedDatasetInputs(
+            feature_path=resolved_features,
+            label_path=resolved_labels,
+            feature_bytes=feature_bytes,
+            label_bytes=label_bytes,
+            features=self._read_csv_bytes(
+                resolved_features,
+                feature_bytes,
+                protected_names=feature_protected,
+            ),
+            labels=self._read_csv_bytes(
+                resolved_labels,
+                label_bytes,
+                protected_names=label_protected,
+                protect_all=True,
+            ),
+        )
+
+    @staticmethod
+    def _read_csv_bytes(
+        path: Path,
+        content: bytes,
+        protected_names: tuple[str | None, ...],
+        protect_all: bool = False,
+    ) -> pd.DataFrame:
+        try:
+            text = content.decode("utf-8-sig")
+            header = next(csv.reader(io.StringIO(text)))
             if not header or len(header) != len(set(header)):
                 DatasetInspector._raise(
                     "duplicate_column",
                     f"CSV columns are empty or duplicated: {path.name}",
                     "Rename duplicate columns before confirming the Dataset Version.",
                 )
-            return pd.read_csv(path)
-        except (OSError, UnicodeError, pd.errors.ParserError, StopIteration) as error:
+            frame = pd.read_csv(
+                io.BytesIO(content),
+                dtype=str,
+                keep_default_na=False,
+            )
+        except (
+            UnicodeError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+            StopIteration,
+        ) as error:
             raise WorkspaceError(
                 code="invalid_dataset_file",
                 message=f"CSV input cannot be read: {path}",
                 next_action="Check CSV encoding, header, and row structure, then retry intake-data.",
             ) from error
+
+        protected = {
+            name.lower()
+            for name in protected_names
+            if isinstance(name, str) and name.strip()
+        }
+        for column in frame.columns:
+            values = frame[column]
+            stripped = values.str.strip()
+            values = values.mask(stripped.eq(""), pd.NA)
+            if not protect_all and str(column).lower() not in protected:
+                missing_tokens = stripped.str.lower().isin(MISSING_VALUE_TOKENS)
+                values = values.mask(missing_tokens, pd.NA)
+                numeric = pd.to_numeric(values, errors="coerce")
+                if int(numeric.notna().sum()) == int(values.notna().sum()):
+                    values = numeric
+            frame[column] = values
+        return frame
 
     @staticmethod
     def _infer_sample_id_col(
@@ -362,17 +490,23 @@ class DatasetInspector:
         if label_hint is not None and label_col is None:
             blockers.append("invalid_label_column")
         if sample_id_col is not None:
-            feature_ids = features[sample_id_col]
-            label_ids = labels[sample_id_col]
-            if DatasetInspector._has_missing_or_blank(feature_ids) or DatasetInspector._has_missing_or_blank(label_ids):
+            raw_feature_ids = features[sample_id_col]
+            raw_label_ids = labels[sample_id_col]
+            feature_ids = DatasetInspector._normalized_text(raw_feature_ids)
+            label_ids = DatasetInspector._normalized_text(raw_label_ids)
+            if DatasetInspector._has_missing_or_blank(
+                raw_feature_ids
+            ) or DatasetInspector._has_missing_or_blank(raw_label_ids):
                 blockers.append("missing_sample_id")
             if feature_ids.duplicated().any():
                 blockers.append("duplicate_feature_sample_id")
             if label_ids.duplicated().any():
                 blockers.append("duplicate_label_sample_id")
-            if not blockers and set(feature_ids.map(str)) != set(label_ids.map(str)):
+            if not blockers and set(feature_ids) != set(label_ids):
                 blockers.append("sample_mismatch")
-        if label_col is not None and labels[label_col].isna().any():
+        if label_col is not None and DatasetInspector._has_missing_or_blank(
+            labels[label_col]
+        ):
             blockers.append("missing_label")
         return blockers
 
@@ -400,8 +534,13 @@ class DatasetInspector:
             )
         ):
             return preview
-        label_lookup = labels.set_index(sample_id_col)[label_col]
-        preview[label_col] = features[sample_id_col].map(label_lookup)
+        label_lookup = pd.Series(
+            labels[label_col].to_numpy(),
+            index=DatasetInspector._normalized_text(labels[sample_id_col]),
+        )
+        preview[label_col] = DatasetInspector._normalized_text(
+            features[sample_id_col]
+        ).map(label_lookup)
         return preview
 
     @staticmethod
@@ -432,9 +571,13 @@ class DatasetInspector:
         return value
 
     @staticmethod
+    def _normalized_text(values: pd.Series) -> pd.Series:
+        return values.astype("string").str.strip()
+
+    @staticmethod
     def _normalized_ids(values: pd.Series) -> pd.Series:
-        normalized = values.map(str).str.strip()
-        if (normalized == "").any():
+        normalized = DatasetInspector._normalized_text(values)
+        if normalized.isna().any() or normalized.eq("").any():
             DatasetInspector._raise_blocker("missing_sample_id")
         return normalized
 
@@ -492,6 +635,15 @@ class DatasetInspector:
                 "invalid_target_metric",
                 "Target performance must be a number from 0 through 1.",
                 "Choose an explicit target value in the inclusive [0, 1] range.",
+            )
+        if (
+            type(command.random_seed) is not int
+            or not 0 <= command.random_seed < 2**32
+        ):
+            DatasetInspector._raise(
+                "invalid_random_seed",
+                "Random seed must be an integer from 0 through 4294967295.",
+                "Choose one fixed integer seed before confirming the Dataset Version.",
             )
 
     @staticmethod

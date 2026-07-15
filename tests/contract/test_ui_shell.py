@@ -2,6 +2,7 @@ from pathlib import Path
 
 from src.domain.models import (
     CapacityStatus,
+    DatasetInspection,
     DatasetPreview,
     DatasetVersionSnapshot,
     RemoteStatus,
@@ -79,6 +80,38 @@ def dataset_version() -> DatasetVersionSnapshot:
     )
 
 
+def dataset_inspection() -> DatasetInspection:
+    return DatasetInspection(
+        status="Pending confirmation",
+        feature_path=Path("features.csv"),
+        label_path=Path("labels.csv"),
+        content_fingerprint="inspection-sha",
+        inferred_sample_id_col="sample_id",
+        inferred_label_col="group",
+        inferred_task_type="binary",
+        class_labels=("case", "control"),
+        sample_count=12,
+        feature_count=2,
+        dtypes={"f1": "float64", "f2": "int64"},
+        missing_rates={"f1": 0.0, "f2": 0.0},
+        class_distribution={"case": 6, "control": 6},
+        preview=DatasetPreview(
+            columns=("sample_id", "f1", "f2", "group"),
+            rows=(("s1", 0.1, 1, "case"),),
+            omitted_count=2,
+        ),
+        unresolved_fields=(
+            "positive_class",
+            "primary_metric",
+            "split_strategy",
+            "target_metric",
+        ),
+        warnings=(),
+        blockers=(),
+        elapsed_ms=4,
+    )
+
+
 def test_shell_has_exactly_six_primary_modules_and_context_fields():
     shell = build_shell_state(workspace_snapshot())
 
@@ -99,6 +132,18 @@ def test_shell_has_exactly_six_primary_modules_and_context_fields():
         "git": "Success",
         "writer": "alice",
     }
+    assert shell.module_status["Dataset Overview"] == "Not started"
+
+
+def test_shell_uses_real_pending_inspection_in_context_and_module_status():
+    shell = build_shell_state(
+        workspace_snapshot(),
+        inspection=dataset_inspection(),
+    )
+
+    assert shell.context["dataset"] == "Pending confirmation"
+    assert shell.module_status["Dataset Overview"] == "Pending confirmation"
+    assert shell.inspection == dataset_inspection()
 
 
 def test_shell_exposes_the_approved_global_status_vocabulary():

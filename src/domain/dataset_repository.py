@@ -56,8 +56,14 @@ class DatasetRepository:
                 message="A Dataset Version requires a non-empty creator identity.",
                 next_action="Reconnect the workspace with a valid team member identity.",
             )
+        self._validate_managed_path(self.datasets_path)
+        if dataset_id is None:
+            for snapshot in self._snapshots():
+                if snapshot.version_fingerprint == normalized.version_fingerprint:
+                    return snapshot
         resolved_dataset_id = dataset_id or self.id_factory()
         self._validate_dataset_id(resolved_dataset_id)
+        self._validate_managed_path(self.datasets_path / resolved_dataset_id)
         existing_versions = self._version_numbers(resolved_dataset_id)
         for version in existing_versions:
             snapshot = self.load(resolved_dataset_id, version)
@@ -98,6 +104,7 @@ class DatasetRepository:
                 next_action="Reload the existing version or create the next reviewed version.",
             )
         family_path.mkdir(parents=True, exist_ok=True)
+        self._validate_managed_path(family_path)
         temporary_path = family_path / f".{version_name}.tmp-{uuid.uuid4().hex}"
         try:
             temporary_path.mkdir()
@@ -123,6 +130,7 @@ class DatasetRepository:
         version: int | None = None,
     ) -> DatasetVersionSnapshot:
         self._validate_dataset_id(dataset_id)
+        self._validate_managed_path(self.datasets_path / dataset_id)
         selected_version = version
         if selected_version is None:
             versions = self._version_numbers(dataset_id)
@@ -139,6 +147,15 @@ class DatasetRepository:
                 message="Dataset version must be a positive integer.",
                 next_action="Choose a version listed by Dataset Overview.",
             )
+        if selected_version not in self._version_numbers(dataset_id):
+            raise WorkspaceError(
+                code="dataset_version_not_found",
+                message=(
+                    f"Dataset Version does not exist: "
+                    f"{dataset_id} v{selected_version}."
+                ),
+                next_action="Choose an existing immutable version from Dataset Overview.",
+            )
 
         relative_path = Path(
             "datasets",
@@ -147,6 +164,7 @@ class DatasetRepository:
             "manifest.json",
         )
         manifest_path = self.repository_path / relative_path
+        self._validate_managed_path(manifest_path)
         manifest = self._load_manifest(manifest_path)
         self._validate_manifest_identity(
             manifest,
@@ -158,17 +176,7 @@ class DatasetRepository:
         return self._snapshot(manifest, relative_path.as_posix())
 
     def latest(self) -> DatasetVersionSnapshot | None:
-        snapshots: list[DatasetVersionSnapshot] = []
-        if not self.datasets_path.is_dir():
-            return None
-        for manifest_path in sorted(
-            self.datasets_path.glob("*/v[0-9][0-9][0-9][0-9]/manifest.json")
-        ):
-            dataset_id = manifest_path.parent.parent.name
-            match = VERSION_DIRECTORY_PATTERN.fullmatch(manifest_path.parent.name)
-            if match is None:
-                continue
-            snapshots.append(self.load(dataset_id, int(match.group(1))))
+        snapshots = self._snapshots()
         if not snapshots:
             return None
         return max(
@@ -182,14 +190,56 @@ class DatasetRepository:
 
     def _version_numbers(self, dataset_id: str) -> list[int]:
         family_path = self.datasets_path / dataset_id
+        self._validate_managed_path(family_path)
         if not family_path.is_dir():
             return []
         versions = []
         for path in family_path.iterdir():
+            self._validate_managed_path(path)
             match = VERSION_DIRECTORY_PATTERN.fullmatch(path.name)
             if path.is_dir() and match is not None:
                 versions.append(int(match.group(1)))
         return sorted(versions)
+
+    def _snapshots(self) -> list[DatasetVersionSnapshot]:
+        self._validate_managed_path(self.datasets_path)
+        if not self.datasets_path.is_dir():
+            return []
+        snapshots: list[DatasetVersionSnapshot] = []
+        for family_path in sorted(self.datasets_path.iterdir()):
+            self._validate_managed_path(family_path)
+            if (
+                not family_path.is_dir()
+                or DATASET_ID_PATTERN.fullmatch(family_path.name) is None
+            ):
+                continue
+            for version in self._version_numbers(family_path.name):
+                snapshots.append(self.load(family_path.name, version))
+        return snapshots
+
+    def _validate_managed_path(self, path: Path) -> None:
+        try:
+            relative = path.relative_to(self.repository_path)
+        except ValueError:
+            self._unsafe_path()
+            return
+        current = self.repository_path
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                self._unsafe_path()
+        try:
+            path.resolve(strict=False).relative_to(self.repository_path)
+        except ValueError:
+            self._unsafe_path()
+
+    @staticmethod
+    def _unsafe_path() -> None:
+        raise WorkspaceError(
+            code="unsafe_dataset_path",
+            message="A managed Dataset Version path uses a symbolic link or resolves outside Team Memory.",
+            next_action="Replace symbolic links with real directories inside the Team Memory Repository.",
+        )
 
     @staticmethod
     def _build_manifest(
@@ -369,15 +419,21 @@ class DatasetRepository:
                 next_action="Restore the immutable Dataset Version from Git.",
             )
 
-    @staticmethod
     def _validate_data_fingerprints(
+        self,
         manifest: dict[str, Any],
         version_path: Path,
     ) -> None:
+        feature_path = version_path / DATASET_FILES["features"]
+        label_path = version_path / DATASET_FILES["labels"]
+        split_path = version_path / DATASET_FILES["split"]
+        self._validate_managed_path(feature_path)
+        self._validate_managed_path(label_path)
+        self._validate_managed_path(split_path)
         try:
-            feature_bytes = (version_path / DATASET_FILES["features"]).read_bytes()
-            label_bytes = (version_path / DATASET_FILES["labels"]).read_bytes()
-            split_bytes = (version_path / DATASET_FILES["split"]).read_bytes()
+            feature_bytes = feature_path.read_bytes()
+            label_bytes = label_path.read_bytes()
+            split_bytes = split_path.read_bytes()
         except OSError as error:
             raise WorkspaceError(
                 code="invalid_dataset_version",
@@ -396,6 +452,7 @@ class DatasetRepository:
         semantic_payload = {
             "content_fingerprint": content_fingerprint,
             "split_fingerprint": split_fingerprint,
+            "source_files": manifest["source_files"],
             "sample_id_col": manifest["sample_id_col"],
             "label_col": manifest["label_col"],
             "task_type": manifest["task_type"],

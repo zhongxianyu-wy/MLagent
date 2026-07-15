@@ -99,6 +99,32 @@ def test_create_and_repeat_identical_dataset_version_is_idempotent(tmp_path):
     ]
 
 
+def test_default_id_factory_reuses_identical_dataset_across_families(tmp_path):
+    repository_path, workspace = bootstrap_workspace(tmp_path)
+    feature_path, label_path = write_pair(tmp_path / "source")
+    normalized = normalize(feature_path, label_path)
+    repository = DatasetRepository(
+        repository_path,
+        clock=lambda: "2026-07-14T01:00:00Z",
+    )
+
+    first = repository.create_version(
+        normalized,
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    repeated = repository.create_version(
+        normalized,
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+
+    assert repeated == first
+    assert [path.name for path in (repository_path / "datasets").iterdir()] == [
+        first.dataset_id
+    ]
+
+
 @pytest.mark.parametrize("change", ["labels", "schema", "split"])
 def test_changed_dataset_inputs_append_version_without_rewriting_v1(
     tmp_path,
@@ -147,6 +173,33 @@ def test_changed_dataset_inputs_append_version_without_rewriting_v1(
     assert (repository_path / "datasets/ds-1/v0002/manifest.json").is_file()
 
 
+def test_changed_source_bytes_create_new_version_even_when_normalized_data_match(
+    tmp_path,
+):
+    repository_path, workspace = bootstrap_workspace(tmp_path)
+    feature_path, label_path = write_pair(tmp_path / "source")
+    repository = dataset_repository(repository_path)
+    first = repository.create_version(
+        normalize(feature_path, label_path),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    original_content_fingerprint = first.content_fingerprint
+
+    feature_path.write_bytes(feature_path.read_bytes().replace(b"\n", b"\r\n"))
+    second = repository.create_version(
+        normalize(feature_path, label_path),
+        actor_id="alice",
+        capacity=workspace.capacity,
+        dataset_id=first.dataset_id,
+    )
+
+    assert second.version == 2
+    assert second.content_fingerprint == original_content_fingerprint
+    assert second.version_fingerprint != first.version_fingerprint
+    assert second.source_files != first.source_files
+
+
 def test_dataset_id_cannot_escape_managed_dataset_root(tmp_path):
     repository_path, workspace = bootstrap_workspace(tmp_path)
     feature_path, label_path = write_pair(tmp_path / "source")
@@ -161,6 +214,31 @@ def test_dataset_id_cannot_escape_managed_dataset_root(tmp_path):
 
     assert caught.value.code == "invalid_dataset_id"
     assert not (tmp_path / "outside").exists()
+
+
+@pytest.mark.parametrize("link_level", ["datasets", "family"])
+def test_symlinked_dataset_paths_cannot_escape_team_memory(tmp_path, link_level):
+    repository_path, workspace = bootstrap_workspace(tmp_path)
+    feature_path, label_path = write_pair(tmp_path / "source")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    datasets_path = repository_path / "datasets"
+    if link_level == "datasets":
+        datasets_path.rmdir()
+        datasets_path.symlink_to(outside, target_is_directory=True)
+    else:
+        (datasets_path / "ds-safe").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkspaceError) as caught:
+        dataset_repository(repository_path).create_version(
+            normalize(feature_path, label_path),
+            actor_id="alice",
+            capacity=workspace.capacity,
+            dataset_id="ds-safe",
+        )
+
+    assert caught.value.code == "unsafe_dataset_path"
+    assert list(outside.iterdir()) == []
 
 
 def test_tampered_dataset_file_is_rejected_on_reload(tmp_path):

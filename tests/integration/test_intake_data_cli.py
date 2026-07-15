@@ -2,10 +2,11 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.agent.main import main
 from src.domain.core import DomainCore
-from src.domain.models import BootstrapMemoryCommand
+from src.domain.models import BootstrapMemoryCommand, ConfirmDatasetCommand
 
 
 def write_pair(root: Path):
@@ -172,3 +173,199 @@ def test_intake_data_cli_returns_nonzero_for_structural_blockers(tmp_path, capsy
     assert exit_code == 2
     assert payload["status"] == "Failed"
     assert payload["blockers"] == ["sample_mismatch"]
+
+
+@pytest.mark.parametrize(
+    ("dataset_id", "error_code"),
+    [
+        ("ds-pending", "dataset_version_not_found"),
+        ("legacy-pending", "invalid_dataset_id"),
+    ],
+)
+def test_authoritative_explore_is_blocked_until_dataset_version_is_confirmed(
+    tmp_path,
+    capsys,
+    dataset_id,
+    error_code,
+):
+    core, connection_path = configured_core(tmp_path)
+    requests = []
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            dataset_id,
+            "--dataset-version",
+            "1",
+            "--workspace-config",
+            str(connection_path),
+        ],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: core,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["status"] == "Failed"
+    assert payload["error"]["code"] == error_code
+    assert requests == []
+
+
+def test_authoritative_explore_accepts_confirmed_dataset_version(tmp_path):
+    core, connection_path = configured_core(tmp_path)
+    feature_path, label_path = write_pair(tmp_path)
+    confirmed = core.confirm_dataset(
+        ConfirmDatasetCommand(
+            connection_path=connection_path,
+            feature_path=feature_path,
+            label_path=label_path,
+            sample_id_col="sample_id",
+            label_col="group",
+            task_type="binary",
+            positive_class="case",
+            primary_metric="roc_auc",
+            split_strategy="train_only",
+            target_metric=0.9,
+        )
+    )
+    requests = []
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            confirmed.dataset_id,
+            "--dataset-version",
+            str(confirmed.version),
+            "--workspace-config",
+            str(connection_path),
+        ],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: core,
+    )
+
+    assert exit_code == 0
+    assert requests[0]["dataset_id"] == confirmed.dataset_id
+    assert requests[0]["dataset_version"] == confirmed.version
+    assert (
+        requests[0]["dataset_content_fingerprint"]
+        == confirmed.content_fingerprint
+    )
+    assert (
+        requests[0]["dataset_version_fingerprint"]
+        == confirmed.version_fingerprint
+    )
+    assert requests[0]["experiment_id"] == "explore-ds-1-v0001"
+    assert requests[0]["manifest_path"] == str(
+        tmp_path
+        / "team-memory"
+        / "datasets"
+        / confirmed.dataset_id
+        / "v0001"
+        / "manifest.json"
+    )
+
+
+def test_confirmed_dataset_reference_uses_one_workspace_connection_read(
+    tmp_path,
+    monkeypatch,
+):
+    core, connection_path = configured_core(tmp_path)
+    feature_path, label_path = write_pair(tmp_path)
+    confirmed = core.confirm_dataset(
+        ConfirmDatasetCommand(
+            connection_path=connection_path,
+            feature_path=feature_path,
+            label_path=label_path,
+            sample_id_col="sample_id",
+            label_col="group",
+            task_type="binary",
+            positive_class="case",
+            primary_metric="roc_auc",
+            split_strategy="train_only",
+            target_metric=0.9,
+        )
+    )
+    original_load = core._load_connection
+    calls = 0
+
+    def load_once(path):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("workspace connection was read more than once")
+        return original_load(path)
+
+    monkeypatch.setattr(core, "_load_connection", load_once)
+
+    reference = core.require_confirmed_dataset_reference(
+        connection_path,
+        confirmed.dataset_id,
+        confirmed.version,
+    )
+
+    assert calls == 1
+    assert reference.snapshot == confirmed
+    assert reference.manifest_path.parent.name == "v0001"
+
+
+def test_authoritative_explore_requires_approved_plan_before_training(
+    tmp_path,
+    capsys,
+):
+    core, connection_path = configured_core(tmp_path)
+    feature_path, label_path = write_pair(tmp_path)
+    confirmed = core.confirm_dataset(
+        ConfirmDatasetCommand(
+            connection_path=connection_path,
+            feature_path=feature_path,
+            label_path=label_path,
+            sample_id_col="sample_id",
+            label_col="group",
+            task_type="binary",
+            positive_class="case",
+            primary_metric="roc_auc",
+            split_strategy="train_only",
+            target_metric=0.9,
+        )
+    )
+    output_root = tmp_path / "outputs"
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            confirmed.dataset_id,
+            "--dataset-version",
+            str(confirmed.version),
+            "--workspace-config",
+            str(connection_path),
+            "--output-root",
+            str(output_root),
+        ],
+        domain_core_factory=lambda: core,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["error"]["code"] == "plan_required"
+    assert not output_root.exists()
+
+
+def test_authoritative_explore_requires_explicit_dataset_version(
+    confirmed_domain_core,
+    capsys,
+):
+    requests = []
+
+    exit_code = main(
+        ["explore", "--dataset-id", "ds-1"],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert payload["error"]["code"] == "missing_dataset_version"
+    assert requests == []

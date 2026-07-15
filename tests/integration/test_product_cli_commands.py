@@ -11,7 +11,9 @@ def test_unknown_command_returns_nonzero():
     assert main(["not-a-command"]) != 0
 
 
-def test_explore_command_runs_real_service_after_intake(tmp_path):
+def test_explore_command_runs_real_service_after_intake(
+    tmp_path,
+):
     intake_code = main(
         [
             "intake",
@@ -35,14 +37,19 @@ def test_explore_command_runs_real_service_after_intake(tmp_path):
             "1",
             "--output-root",
             str(tmp_path / "outputs"),
-        ]
+        ],
+        domain_core_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("legacy manifest exploration must not use Team Memory gating")
+        ),
     )
 
     assert explore_code == 0
     assert Path(tmp_path, "outputs", "explore-clear", "rounds.jsonl").exists()
 
 
-def test_explore_command_returns_nonzero_when_kfold_is_impossible_after_split(tmp_path):
+def test_explore_command_returns_nonzero_when_kfold_is_impossible_after_split(
+    tmp_path,
+):
     intake_code = main(
         [
             "intake",
@@ -67,7 +74,10 @@ def test_explore_command_returns_nonzero_when_kfold_is_impossible_after_split(tm
             "1",
             "--output-root",
             str(tmp_path / "outputs"),
-        ]
+        ],
+        domain_core_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("legacy manifest exploration must not use Team Memory gating")
+        ),
     )
 
     assert exit_code == 2

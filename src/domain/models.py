@@ -94,6 +94,7 @@ class DatasetInspection:
     status: str
     feature_path: Path
     label_path: Path
+    content_fingerprint: str
     inferred_sample_id_col: str | None
     inferred_label_col: str | None
     inferred_task_type: str | None
@@ -148,6 +149,12 @@ class DatasetVersionSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ConfirmedDatasetReference:
+    snapshot: DatasetVersionSnapshot
+    manifest_path: Path
 
 
 @dataclass(frozen=True)

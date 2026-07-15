@@ -11,6 +11,7 @@ from src.domain.local_index import LocalIndex
 from src.domain.memory_repository import MemoryRepository, RepositoryStatus
 from src.domain.models import (
     BootstrapMemoryCommand,
+    ConfirmedDatasetReference,
     ConfirmDatasetCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
@@ -128,6 +129,69 @@ class DomainCore:
                 )
             return datasets.latest()
         return datasets.load(dataset_id, version)
+
+    def require_confirmed_dataset(
+        self,
+        connection_path: Path,
+        dataset_id: str,
+        version: int,
+    ) -> DatasetVersionSnapshot:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._require_confirmed_from_repository(
+            repository.repository_path,
+            dataset_id,
+            version,
+        )
+
+    def require_confirmed_dataset_reference(
+        self,
+        connection_path: Path,
+        dataset_id: str,
+        version: int,
+    ) -> ConfirmedDatasetReference:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        repository_root = repository.repository_path
+        snapshot = self._require_confirmed_from_repository(
+            repository_root,
+            dataset_id,
+            version,
+        )
+        manifest_path = (repository_root / snapshot.asset_path).resolve()
+        try:
+            manifest_path.relative_to(repository_root)
+        except ValueError as error:
+            raise WorkspaceError(
+                code="unsafe_dataset_path",
+                message="The confirmed Dataset Version manifest is outside Team Memory.",
+                next_action="Restore the Dataset Version under the managed datasets directory.",
+            ) from error
+        return ConfirmedDatasetReference(
+            snapshot=snapshot,
+            manifest_path=manifest_path,
+        )
+
+    @staticmethod
+    def _require_confirmed_from_repository(
+        repository_path: Path,
+        dataset_id: str,
+        version: int,
+    ) -> DatasetVersionSnapshot:
+        dataset = DatasetRepository(repository_path).load(dataset_id, version)
+        if dataset.state != "confirmed":
+            raise WorkspaceError(
+                code="dataset_not_confirmed",
+                message=f"Dataset {dataset_id} is not a confirmed Dataset Version.",
+                next_action="Complete intake-data confirmation before formal training.",
+            )
+        return dataset
 
     @staticmethod
     def _snapshot(

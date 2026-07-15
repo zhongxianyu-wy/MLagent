@@ -49,11 +49,22 @@ def main(
         return 0
     if args[0] == "explore":
         manifest_path = _option(args, "--manifest-path")
-        dataset_id = _option(args, "--dataset-id", None)
-        if manifest_path is not None and dataset_id is None:
+        explicit_dataset_id = _option(args, "--dataset-id", None)
+        legacy_manifest = manifest_path is not None and explicit_dataset_id is None
+        dataset_id = explicit_dataset_id
+        if legacy_manifest:
             dataset_id = json.loads(Path(manifest_path).read_text())["dataset_id"]
         if dataset_id is None:
             return 2
+        authoritative_reference = None
+        if not legacy_manifest:
+            authoritative_reference = _guard_authoritative_dataset(
+                args,
+                dataset_id,
+                domain_core_factory=domain_core_factory,
+            )
+            if authoritative_reference is None:
+                return 2
         max_rounds = int(_option(args, "--max-rounds", "1"))
         output_root = _option(args, "--output-root", "experiments/outputs")
         request = {
@@ -61,11 +72,39 @@ def main(
             "dataset_id": dataset_id,
             "max_rounds": max_rounds,
         }
-        if manifest_path is not None:
+        if authoritative_reference is not None:
+            snapshot = authoritative_reference.snapshot
+            request.update(
+                {
+                    "dataset_version": snapshot.version,
+                    "dataset_content_fingerprint": snapshot.content_fingerprint,
+                    "dataset_version_fingerprint": snapshot.version_fingerprint,
+                    "manifest_path": str(authoritative_reference.manifest_path),
+                    "experiment_id": (
+                        f"explore-{dataset_id}-v{snapshot.version:04d}"
+                    ),
+                    "guidance_metric_name": _training_metric_name(
+                        snapshot.primary_metric
+                    ),
+                    "random_seed": snapshot.random_seed,
+                }
+            )
+        elif manifest_path is not None:
             request["manifest_path"] = manifest_path
             request["experiment_id"] = f"explore-{dataset_id}"
         if explore_factory is not None:
             return explore_factory(request)
+
+        if authoritative_reference is not None:
+            _print_workspace_error(
+                code="plan_required",
+                message="Formal exploration requires an approved Exploration Plan.",
+                next_action=(
+                    "Create and approve an Exploration Plan before starting "
+                    "this Dataset Version."
+                ),
+            )
+            return 2
 
         from src.agent.harness import ExplorationHarness
         from src.frontend_api.run_service import RunService
@@ -82,6 +121,22 @@ def main(
             "dataset_id": args[args.index("--dataset-id") + 1],
             "strict": True,
         }
+        authoritative_reference = _guard_authoritative_dataset(
+            args,
+            request["dataset_id"],
+            domain_core_factory=domain_core_factory,
+        )
+        if authoritative_reference is None:
+            return 2
+        snapshot = authoritative_reference.snapshot
+        request.update(
+            {
+                "dataset_version": snapshot.version,
+                "dataset_content_fingerprint": snapshot.content_fingerprint,
+                "dataset_version_fingerprint": snapshot.version_fingerprint,
+                "manifest_path": str(authoritative_reference.manifest_path),
+            }
+        )
         if reproduce_factory is not None:
             return reproduce_factory(request)
         return 2
@@ -128,6 +183,64 @@ def _optional_float(args: list[str], name: str) -> float | None:
 def _optional_int(args: list[str], name: str) -> int | None:
     value = _option(args, name, None)
     return None if value is None else int(value)
+
+
+def _guard_authoritative_dataset(
+    args: list[str],
+    dataset_id: str,
+    domain_core_factory: Callable[[], object] | None,
+):
+    from src.domain.core import DomainCore
+    from src.domain.models import WorkspaceError
+
+    try:
+        dataset_version = _optional_int(args, "--dataset-version")
+        if dataset_version is None:
+            raise WorkspaceError(
+                code="missing_dataset_version",
+                message="Formal execution requires an explicit Dataset Version.",
+                next_action=(
+                    "Pass --dataset-version with a confirmed immutable "
+                    "version number."
+                ),
+            )
+        core = domain_core_factory() if domain_core_factory else DomainCore()
+        reference = core.require_confirmed_dataset_reference(
+            Path(_option(args, "--workspace-config", ".mlagent-workspace.json")),
+            dataset_id,
+            dataset_version,
+        )
+    except WorkspaceError as error:
+        print(
+            json.dumps(
+                {"status": "Failed", "error": error.to_dict()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return None
+    return reference
+
+
+def _training_metric_name(primary_metric: str) -> str:
+    return "auc" if primary_metric == "roc_auc" else primary_metric
+
+
+def _print_workspace_error(code: str, message: str, next_action: str) -> None:
+    print(
+        json.dumps(
+            {
+                "status": "Failed",
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "next_action": next_action,
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 def _bootstrap_memory(
