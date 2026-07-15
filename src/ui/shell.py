@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.domain.models import (
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExplorationReviewSnapshot,
     WorkspaceSnapshot,
 )
 
@@ -49,12 +50,14 @@ class ShellState:
     issues: tuple[dict[str, str], ...]
     dataset: DatasetVersionSnapshot | None
     inspection: DatasetInspection | None
+    exploration_review: ExplorationReviewSnapshot | None
 
 
 def build_shell_state(
     snapshot: WorkspaceSnapshot,
     dataset: DatasetVersionSnapshot | None = None,
     inspection: DatasetInspection | None = None,
+    exploration_review: ExplorationReviewSnapshot | None = None,
 ) -> ShellState:
     git_status = {
         "reachable": "Success",
@@ -67,6 +70,14 @@ def build_shell_state(
         module_status["Dataset Overview"] = "Success"
     elif inspection is not None:
         module_status["Dataset Overview"] = inspection.status
+    run_status = "Not started"
+    if exploration_review is not None:
+        run_status = {
+            "pending_review": "Pending review",
+            "approved": "Approved",
+            "approval_stale": "Failed",
+        }.get(exploration_review.approval_state, "Failed")
+        module_status["Run Status"] = run_status
     return ShellState(
         navigation=NAVIGATION,
         context={
@@ -80,7 +91,7 @@ def build_shell_state(
                     else "Not started"
                 )
             ),
-            "run": "Not started",
+            "run": run_status,
             "git": git_status,
             "writer": snapshot.actor_id,
         },
@@ -94,6 +105,7 @@ def build_shell_state(
         issues=tuple(issue.to_dict() for issue in snapshot.issues),
         dataset=dataset,
         inspection=inspection,
+        exploration_review=exploration_review,
     )
 
 

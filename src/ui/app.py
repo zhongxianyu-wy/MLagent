@@ -14,8 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.domain.core import DomainCore
 from src.domain.models import (
+    ApproveExplorationPlanCommand,
+    AuthorizeTrainingCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExplorationReviewSnapshot,
     InspectDatasetCommand,
     WorkspaceError,
 )
@@ -33,17 +36,27 @@ def main() -> None:
     connection_path = Path(
         os.environ.get("MLAGENT_WORKSPACE_CONFIG", ".mlagent-workspace.json")
     )
+    code_root = Path(os.environ.get("MLAGENT_CODE_ROOT", str(PROJECT_ROOT)))
     try:
         core = DomainCore()
         snapshot = core.open_workspace(connection_path)
         dataset = core.get_dataset_overview(connection_path)
+        exploration_review = core.get_exploration_review(
+            connection_path,
+            code_root,
+        )
     except WorkspaceError as error:
         st.error(error.message)
         st.caption(error.next_action)
         return
 
     inspection = st.session_state.get("dataset_inspection")
-    shell = build_shell_state(snapshot, dataset, inspection)
+    shell = build_shell_state(
+        snapshot,
+        dataset,
+        inspection,
+        exploration_review,
+    )
     with st.sidebar:
         st.title("MLagent")
         selected_module = st.radio(
@@ -67,6 +80,13 @@ def main() -> None:
 
     if selected_module == "Dataset Overview":
         _render_dataset_overview(core, shell.dataset, shell.inspection)
+    elif selected_module == "Run Status":
+        _render_run_status(
+            core,
+            connection_path,
+            code_root,
+            shell.exploration_review,
+        )
 
     for issue in shell.issues:
         st.warning(f"{issue['message']} {issue['next_action']}")
@@ -208,6 +228,167 @@ def _render_dataset_inspection(
         st.error(blocker.replace("_", " ").capitalize())
     for warning in inspection.warnings:
         st.warning(warning.replace("_", " ").capitalize())
+
+
+def _render_run_status(
+    core: DomainCore,
+    connection_path: Path,
+    code_root: Path,
+    review: ExplorationReviewSnapshot | None,
+) -> None:
+    if review is None:
+        st.info("No exploration plan recorded")
+        return
+
+    plan = review.plan
+    approval_label = {
+        "pending_review": "Pending review",
+        "approved": "Approved",
+        "approval_stale": "Approval stale",
+    }.get(review.approval_state, "Failed")
+    summary_columns = st.columns(4)
+    summary = (
+        ("Approval", approval_label),
+        ("Dataset", f"{plan.dataset_id} v{plan.dataset_version}"),
+        ("Rounds", str(len(plan.rounds))),
+        ("Target", f"{plan.target_metric:g}"),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.caption(f"{plan.primary_metric} · {plan.plan_id}")
+
+    st.markdown("**User direction**")
+    st.write(plan.user_direction)
+    st.markdown("**Baseline hypothesis**")
+    st.write(plan.baseline_hypothesis)
+
+    st.markdown("**Exploration rounds**")
+    for round_plan in plan.rounds:
+        st.markdown(
+            f"**Round {round_plan.round_number}: "
+            f"{round_plan.optimization_direction}**"
+        )
+        st.write(round_plan.hypothesis)
+        st.caption(" · ".join(round_plan.intended_changes))
+
+    constraint_columns = st.columns(2)
+    with constraint_columns[0]:
+        st.markdown("**Stop conditions**")
+        st.dataframe(
+            pd.DataFrame({"Condition": list(plan.stop_conditions)}),
+            hide_index=True,
+            width="stretch",
+        )
+    with constraint_columns[1]:
+        st.markdown("**Resource limits**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Resource": key, "Limit": value}
+                    for key, value in plan.resource_limits.items()
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+
+    excluded = set(plan.excluded_pending_experience_ids)
+    active_pending = tuple(
+        item for item in plan.pending_experience_ids if item not in excluded
+    )
+    experience_columns = st.columns(3)
+    with experience_columns[0]:
+        _render_reference_group(
+            "Trusted Experience",
+            plan.trusted_experience_ids,
+        )
+    with experience_columns[1]:
+        _render_reference_group(
+            "Pending Experience (low confidence)",
+            active_pending,
+        )
+    with experience_columns[2]:
+        _render_reference_group(
+            "Excluded Pending Experience",
+            plan.excluded_pending_experience_ids,
+        )
+
+    st.markdown("**Candidate code**")
+    previews = {item.path: item for item in review.code_previews}
+    selected_path = st.selectbox("Candidate code file", tuple(previews))
+    selected = previews[selected_path]
+    st.code(
+        selected.content,
+        language="python" if selected.path.endswith(".py") else None,
+    )
+    st.caption(
+        f"{selected.state} · recorded {selected.recorded_sha256[:12]} · "
+        f"current {(selected.current_sha256 or 'unavailable')[:12]}"
+    )
+    code_is_current = all(item.state == "current" for item in review.code_previews)
+    if not code_is_current:
+        st.warning("Candidate code changed or is unavailable; record it again before approval.")
+    elif review.approval_state == "approval_stale":
+        st.warning("The prior approval is stale; approve the current plan and code again.")
+
+    action_columns = st.columns(2)
+    with action_columns[0]:
+        if st.button(
+            "Approve current plan and code",
+            type="primary",
+            disabled=(
+                not code_is_current or review.approval_state == "approved"
+            ),
+        ):
+            try:
+                core.approve_exploration_plan(
+                    ApproveExplorationPlanCommand(
+                        connection_path=connection_path,
+                        code_root=code_root,
+                        plan_id=plan.plan_id,
+                    )
+                )
+            except WorkspaceError as error:
+                st.error(f"{error.code}: {error.message}")
+                st.caption(error.next_action)
+            else:
+                st.rerun()
+    with action_columns[1]:
+        if st.button("Verify training readiness"):
+            try:
+                authorization = core.authorize_training(
+                    AuthorizeTrainingCommand(
+                        connection_path=connection_path,
+                        code_root=code_root,
+                        entry_point="ui_run_status",
+                        dataset_id=plan.dataset_id,
+                        dataset_version=plan.dataset_version,
+                        plan_id=plan.plan_id,
+                        approval_id=(
+                            review.approval.asset_id
+                            if review.approval is not None
+                            else None
+                        ),
+                    )
+                )
+            except WorkspaceError as error:
+                st.error(f"{error.code}: {error.message}")
+                st.caption(error.next_action)
+            else:
+                st.success(
+                    f"Authorized for Issue #5 execution: "
+                    f"{authorization.approval_id}"
+                )
+
+
+def _render_reference_group(label: str, references: tuple[str, ...]) -> None:
+    st.markdown(f"**{label}**")
+    if not references:
+        st.caption("None")
+        return
+    for reference in references:
+        st.write(reference)
 
 
 def _apply_styles() -> None:

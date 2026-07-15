@@ -222,6 +222,18 @@ class ExplorationRepository:
                 message="Candidate code changed after the current plan was recorded.",
                 next_action="Record the updated plan and code fingerprints before approval.",
             )
+        for existing in reversed(self._list_approvals(plan.plan_id)):
+            if (
+                existing.plan_event_id == plan.asset_id
+                and existing.dataset_id == plan.dataset_id
+                and existing.dataset_version == plan.dataset_version
+                and existing.dataset_version_fingerprint
+                == plan.dataset_version_fingerprint
+                and existing.plan_fingerprint == plan.plan_fingerprint
+                and existing.code_fingerprint == plan.code_fingerprint
+                and existing.decision == "approved"
+            ):
+                return existing
         approval_id = self._new_id(self.approval_id_factory, "approval")
         created_at = self._timestamp()
         payload: dict[str, Any] = {

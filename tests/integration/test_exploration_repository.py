@@ -163,6 +163,31 @@ def test_approval_binds_current_plan_dataset_and_code_fingerprints(
     assert review.code_previews[0].state == "current"
 
 
+def test_repeated_approval_of_same_current_content_is_idempotent(
+    planning_workspace,
+):
+    plan = planning_workspace.record()
+    first = planning_workspace.repository.approve_current(
+        plan.plan_id,
+        code_root=planning_workspace.code_root,
+        actor_id="alice",
+        capacity=planning_workspace.capacity,
+    )
+    second = planning_workspace.repository.approve_current(
+        plan.plan_id,
+        code_root=planning_workspace.code_root,
+        actor_id="alice",
+        capacity=planning_workspace.capacity,
+    )
+
+    assert second == first
+    approval_files = list(
+        (planning_workspace.memory_root / "approvals" / "exploration-plans")
+        .glob("**/*.json")
+    )
+    assert len(approval_files) == 1
+
+
 def test_plan_or_code_change_makes_prior_approval_stale(planning_workspace):
     plan = planning_workspace.record()
     planning_workspace.repository.approve_current(

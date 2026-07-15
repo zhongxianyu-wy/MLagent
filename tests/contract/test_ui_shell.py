@@ -1,10 +1,15 @@
 from pathlib import Path
 
 from src.domain.models import (
+    CandidateCodeFile,
+    CandidateCodePreview,
     CapacityStatus,
     DatasetInspection,
     DatasetPreview,
     DatasetVersionSnapshot,
+    ExplorationPlanSnapshot,
+    ExplorationReviewSnapshot,
+    ExplorationRound,
     RemoteStatus,
     WorkspaceSnapshot,
 )
@@ -167,3 +172,60 @@ def test_shell_uses_confirmed_dataset_version_in_context_and_module_status():
     assert shell.context["dataset"] == "ds-1 v1"
     assert shell.module_status["Dataset Overview"] == "Success"
     assert shell.dataset == dataset_version()
+
+
+def test_shell_uses_exploration_review_in_run_context_and_module_status():
+    review = exploration_review("pending_review")
+
+    shell = build_shell_state(
+        workspace_snapshot(),
+        dataset_version(),
+        exploration_review=review,
+    )
+
+    assert shell.context["run"] == "Pending review"
+    assert shell.module_status["Run Status"] == "Pending review"
+    assert shell.exploration_review == review
+
+
+def exploration_review(state: str) -> ExplorationReviewSnapshot:
+    plan = ExplorationPlanSnapshot(
+        asset_id="plan-event-1",
+        asset_path="raw-records/exploration-plans/plan-1/plan-event-1.json",
+        plan_id="plan-1",
+        planning_session_id="session-1",
+        dataset_id="ds-1",
+        dataset_version=1,
+        dataset_content_fingerprint="content-sha",
+        dataset_version_fingerprint="version-sha",
+        user_direction="Improve validation AUC",
+        baseline_hypothesis="Fit baseline",
+        rounds=(ExplorationRound(1, "Baseline", "baseline", ("fit",)),),
+        primary_metric="roc_auc",
+        target_metric=0.9,
+        stop_conditions=("target reached",),
+        resource_limits={"max_minutes": 30},
+        trusted_experience_ids=("experience-approved",),
+        pending_experience_ids=("experience-pending",),
+        excluded_pending_experience_ids=(),
+        candidate_code_files=(CandidateCodeFile("train.py", "sha", 12),),
+        code_fingerprint="code-sha",
+        plan_fingerprint="plan-sha",
+        state="pending_review",
+        created_at="2026-07-15T00:00:00Z",
+        created_by="alice",
+    )
+    return ExplorationReviewSnapshot(
+        plan=plan,
+        approval=None,
+        approval_state=state,
+        code_previews=(
+            CandidateCodePreview(
+                path="train.py",
+                content="print('train')\n",
+                recorded_sha256="sha",
+                current_sha256="sha",
+                state="current",
+            ),
+        ),
+    )
