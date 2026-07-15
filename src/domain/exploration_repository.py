@@ -63,6 +63,17 @@ APPROVAL_CONTENT_FIELDS = (
     "created_at",
     "created_by",
 )
+GATE_AUDIT_CONTENT_FIELDS = (
+    "entry_point",
+    "dataset_id",
+    "dataset_version",
+    "plan_id",
+    "approval_id",
+    "reason_code",
+    "next_action",
+    "created_at",
+    "created_by",
+)
 
 
 class ExplorationRepository:
@@ -282,6 +293,94 @@ class ExplorationRepository:
             approval_state=state,
             code_previews=previews,
         )
+
+    def require_current_approval(
+        self,
+        plan_id: str,
+        approval_id: str,
+        code_root: Path,
+    ) -> tuple[ExplorationPlanSnapshot, ExplorationApprovalSnapshot]:
+        plan = self.current(plan_id)
+        approval = self.load_approval(plan_id, approval_id)
+        current_files = self._read_code_files(
+            code_root,
+            tuple(item.path for item in plan.candidate_code_files),
+        )
+        binding_is_current = (
+            current_files == plan.candidate_code_files
+            and _code_fingerprint(current_files) == plan.code_fingerprint
+            and approval.plan_event_id == plan.asset_id
+            and approval.dataset_id == plan.dataset_id
+            and approval.dataset_version == plan.dataset_version
+            and approval.dataset_version_fingerprint
+            == plan.dataset_version_fingerprint
+            and approval.plan_fingerprint == plan.plan_fingerprint
+            and approval.code_fingerprint == plan.code_fingerprint
+            and approval.decision == "approved"
+        )
+        if not binding_is_current:
+            raise WorkspaceError(
+                code="approval_stale",
+                message="The exploration approval no longer matches the current plan or code.",
+                next_action="Review and approve the current plan and candidate code again.",
+            )
+        return plan, approval
+
+    def append_training_gate_audit(
+        self,
+        *,
+        entry_point: str,
+        dataset_id: str,
+        dataset_version: int,
+        plan_id: str | None,
+        approval_id: str | None,
+        reason_code: str,
+        next_action: str,
+        actor_id: str,
+        capacity: CapacityStatus,
+    ) -> dict[str, Any]:
+        self._validate_actor(actor_id)
+        if (
+            not isinstance(entry_point, str)
+            or not entry_point.strip()
+            or not isinstance(dataset_id, str)
+            or not dataset_id.strip()
+            or type(dataset_version) is not int
+            or not isinstance(reason_code, str)
+            or not reason_code.strip()
+            or not isinstance(next_action, str)
+            or not next_action.strip()
+        ):
+            raise WorkspaceError(
+                code="invalid_training_gate_audit",
+                message="The blocked training attempt lacks required audit fields.",
+                next_action="Retry through a supported formal-training entry point.",
+            )
+        if plan_id is not None:
+            self._validate_id(plan_id, "plan ID")
+        if approval_id is not None:
+            self._validate_id(approval_id, "approval ID")
+        audit_id = self._new_id(self.audit_id_factory, "training gate audit")
+        payload: dict[str, Any] = {
+            "asset_type": "training_gate_audit",
+            "asset_id": audit_id,
+            "schema_version": EXPLORATION_SCHEMA_VERSION,
+            "state": "blocked",
+            "entry_point": entry_point,
+            "dataset_id": dataset_id,
+            "dataset_version": dataset_version,
+            "plan_id": plan_id,
+            "approval_id": approval_id,
+            "reason_code": reason_code,
+            "next_action": next_action,
+            "created_at": self._timestamp(),
+            "created_by": actor_id,
+        }
+        payload["audit_fingerprint"] = _fingerprint(
+            {field: payload[field] for field in GATE_AUDIT_CONTENT_FIELDS}
+        )
+        self._write_json(GATE_AUDIT_ROOT / f"{audit_id}.json", payload, capacity)
+        return payload
 
     def _list_approvals(
         self,

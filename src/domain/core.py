@@ -2,21 +2,30 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.domain.dataset_intake import DatasetInspector
 from src.domain.dataset_repository import DatasetRepository
+from src.domain.exploration_repository import ExplorationRepository
 from src.domain.local_index import LocalIndex
 from src.domain.memory_repository import MemoryRepository, RepositoryStatus
 from src.domain.models import (
+    ApproveExplorationPlanCommand,
+    AuthorizeTrainingCommand,
     BootstrapMemoryCommand,
     ConfirmedDatasetReference,
     ConfirmDatasetCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExplorationApprovalSnapshot,
+    ExplorationPlanSnapshot,
+    ExplorationReviewSnapshot,
     IndexSummary,
     InspectDatasetCommand,
+    RecordExplorationPlanCommand,
+    TrainingAuthorization,
     WorkspaceConnection,
     WorkspaceError,
     WorkspaceSnapshot,
@@ -28,9 +37,15 @@ class DomainCore:
         self,
         id_factory: Callable[[], str] | None = None,
         dataset_id_factory: Callable[[], str] | None = None,
+        exploration_event_id_factory: Callable[[], str] | None = None,
+        exploration_approval_id_factory: Callable[[], str] | None = None,
+        training_gate_audit_id_factory: Callable[[], str] | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
         self.dataset_id_factory = dataset_id_factory
+        self.exploration_event_id_factory = exploration_event_id_factory
+        self.exploration_approval_id_factory = exploration_approval_id_factory
+        self.training_gate_audit_id_factory = training_gate_audit_id_factory
         self.clock = clock
         self.memory_repository = MemoryRepository(
             id_factory=id_factory,
@@ -178,6 +193,156 @@ class DomainCore:
             manifest_path=manifest_path,
         )
 
+    def record_exploration_plan(
+        self,
+        command: RecordExplorationPlanCommand,
+    ) -> ExplorationPlanSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        dataset = self._require_confirmed_from_repository(
+            repository.repository_path,
+            command.dataset_id,
+            command.dataset_version,
+        )
+        return self._exploration_repository(
+            repository.repository_path
+        ).record_plan(
+            command,
+            dataset,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+    def approve_exploration_plan(
+        self,
+        command: ApproveExplorationPlanCommand,
+    ) -> ExplorationApprovalSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._exploration_repository(
+            repository.repository_path
+        ).approve_current(
+            command.plan_id,
+            command.code_root,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+    def get_exploration_review(
+        self,
+        connection_path: Path,
+        code_root: Path,
+        plan_id: str | None = None,
+    ) -> ExplorationReviewSnapshot | None:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        exploration = self._exploration_repository(repository.repository_path)
+        selected_plan_id = plan_id
+        if selected_plan_id is None:
+            latest = exploration.latest()
+            if latest is None:
+                return None
+            selected_plan_id = latest.plan_id
+        return exploration.review(selected_plan_id, code_root)
+
+    def authorize_training(
+        self,
+        command: AuthorizeTrainingCommand,
+    ) -> TrainingAuthorization:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        exploration = self._exploration_repository(repository.repository_path)
+        try:
+            dataset = self._require_confirmed_from_repository(
+                repository.repository_path,
+                command.dataset_id,
+                command.dataset_version,
+            )
+            if not command.plan_id or not command.approval_id:
+                raise WorkspaceError(
+                    code="plan_approval_required",
+                    message="Formal exploration requires an approved current plan and code.",
+                    next_action="Review and approve the current exploration plan before training.",
+                )
+            plan, approval = exploration.require_current_approval(
+                command.plan_id,
+                command.approval_id,
+                command.code_root,
+            )
+            if (
+                plan.dataset_id != dataset.dataset_id
+                or plan.dataset_version != dataset.version
+                or plan.dataset_content_fingerprint
+                != dataset.content_fingerprint
+                or plan.dataset_version_fingerprint
+                != dataset.version_fingerprint
+                or approval.dataset_id != dataset.dataset_id
+                or approval.dataset_version != dataset.version
+                or approval.dataset_version_fingerprint
+                != dataset.version_fingerprint
+            ):
+                raise WorkspaceError(
+                    code="approved_dataset_mismatch",
+                    message="The approved exploration plan does not match the requested Dataset Version.",
+                    next_action="Select the approved Dataset Version or record and approve a new plan.",
+                )
+            authorized_at = self.clock() if self.clock is not None else _utc_now()
+            return TrainingAuthorization(
+                authorized=True,
+                entry_point=command.entry_point,
+                dataset_id=dataset.dataset_id,
+                dataset_version=dataset.version,
+                dataset_version_fingerprint=dataset.version_fingerprint,
+                plan_id=plan.plan_id,
+                plan_event_id=plan.asset_id,
+                approval_id=approval.asset_id,
+                plan_fingerprint=plan.plan_fingerprint,
+                code_fingerprint=plan.code_fingerprint,
+                authorized_at=authorized_at,
+                authorized_by=connection.actor_id,
+            )
+        except WorkspaceError as error:
+            try:
+                exploration.append_training_gate_audit(
+                    entry_point=command.entry_point,
+                    dataset_id=command.dataset_id,
+                    dataset_version=command.dataset_version,
+                    plan_id=command.plan_id,
+                    approval_id=command.approval_id,
+                    reason_code=error.code,
+                    next_action=error.next_action,
+                    actor_id=connection.actor_id,
+                    capacity=repository.capacity,
+                )
+            except WorkspaceError as audit_error:
+                raise WorkspaceError(
+                    code="training_gate_audit_failed",
+                    message="Formal training was blocked, but its required audit event could not be recorded.",
+                    next_action="Repair Team Memory write access before retrying formal training.",
+                ) from audit_error
+            raise
+
+    def _exploration_repository(self, repository_path: Path) -> ExplorationRepository:
+        return ExplorationRepository(
+            repository_path,
+            event_id_factory=self.exploration_event_id_factory,
+            approval_id_factory=self.exploration_approval_id_factory,
+            audit_id_factory=self.training_gate_audit_id_factory,
+            clock=self.clock,
+        )
+
     @staticmethod
     def _require_confirmed_from_repository(
         repository_path: Path,
@@ -269,3 +434,7 @@ class DomainCore:
             repository_path=Path(payload["repository_path"]),
             actor_id=payload["actor_id"],
         )
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
