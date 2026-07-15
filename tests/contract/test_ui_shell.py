@@ -13,6 +13,7 @@ from src.domain.models import (
     RemoteStatus,
     WorkspaceSnapshot,
 )
+from src.ui.app import _module_anchor
 from src.ui.shell import GLOBAL_STATUS_VOCABULARY, NAVIGATION, build_shell_state
 
 
@@ -140,6 +141,11 @@ def test_shell_has_exactly_six_primary_modules_and_context_fields():
     assert shell.module_status["Dataset Overview"] == "Not started"
 
 
+def test_module_heading_anchor_tracks_the_selected_module():
+    assert _module_anchor("Code Review") == "code-review"
+    assert _module_anchor("Run Status") == "run-status"
+
+
 def test_shell_uses_real_pending_inspection_in_context_and_module_status():
     shell = build_shell_state(
         workspace_snapshot(),
@@ -204,6 +210,7 @@ def exploration_review(state: str) -> ExplorationReviewSnapshot:
         primary_metric="roc_auc",
         target_metric=0.9,
         stop_conditions=("target reached",),
+        risks=("validation overfitting",),
         resource_limits={"max_minutes": 30},
         trusted_experience_ids=("experience-approved",),
         pending_experience_ids=("experience-pending",),

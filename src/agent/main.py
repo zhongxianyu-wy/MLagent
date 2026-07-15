@@ -74,12 +74,10 @@ def main(
             )
             if authoritative_reference is None:
                 return 2
-        max_rounds = int(_option(args, "--max-rounds", "1"))
         output_root = _option(args, "--output-root", "experiments/outputs")
         request = {
             "mode": "exploration",
             "dataset_id": dataset_id,
-            "max_rounds": max_rounds,
         }
         if authoritative_reference is not None:
             snapshot = authoritative_reference.snapshot
@@ -104,10 +102,12 @@ def main(
                         snapshot.primary_metric
                     ),
                     "random_seed": snapshot.random_seed,
+                    "max_rounds": authorization.round_count,
                     "authorization": authorization.to_dict(),
                 }
             )
         elif manifest_path is not None:
+            request["max_rounds"] = int(_option(args, "--max-rounds", "1"))
             request["manifest_path"] = manifest_path
             request["experiment_id"] = f"explore-{dataset_id}"
         if explore_factory is not None:
@@ -239,6 +239,13 @@ def _guard_authoritative_dataset(
             )
         )
         return None
+    except (TypeError, ValueError) as error:
+        _print_workspace_error(
+            code="invalid_arguments",
+            message=str(error),
+            next_action="Check Dataset Version arguments and retry.",
+        )
+        return None
     return reference
 
 
@@ -275,6 +282,13 @@ def _guard_exploration_approval(
                 ensure_ascii=False,
                 sort_keys=True,
             )
+        )
+        return None
+    except (TypeError, ValueError) as error:
+        _print_workspace_error(
+            code="invalid_arguments",
+            message=str(error),
+            next_action="Check plan approval arguments and retry.",
         )
         return None
     return authorization
@@ -526,6 +540,7 @@ def _design_and_explore(
                         for item in plan["rounds"]
                     ),
                     stop_conditions=tuple(plan["stop_conditions"]),
+                    risks=tuple(plan["risks"]),
                     resource_limits=dict(plan["resource_limits"]),
                     trusted_experience_ids=tuple(
                         plan["trusted_experience_ids"]
@@ -596,6 +611,7 @@ def _load_exploration_plan_file(path: Path) -> dict:
         "baseline_hypothesis",
         "rounds",
         "stop_conditions",
+        "risks",
         "resource_limits",
         "trusted_experience_ids",
         "pending_experience_ids",

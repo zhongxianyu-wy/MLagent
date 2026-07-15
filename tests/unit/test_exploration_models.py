@@ -37,6 +37,7 @@ def test_exploration_plan_snapshot_is_json_safe_without_strategy_version():
         primary_metric="roc_auc",
         target_metric=0.9,
         stop_conditions=("target reached",),
+        risks=("validation overfitting",),
         resource_limits={"max_minutes": 30},
         trusted_experience_ids=("exp-trusted",),
         pending_experience_ids=("exp-pending",),
@@ -70,6 +71,7 @@ def test_exploration_commands_and_review_snapshots_keep_paths_typed():
         baseline_hypothesis="Fit baseline",
         rounds=(ExplorationRound(1, "Baseline", "baseline", ("fit",)),),
         stop_conditions=("target reached",),
+        risks=("validation overfitting",),
         resource_limits={"max_minutes": 30},
         candidate_code_paths=("train.py",),
     )
@@ -134,12 +136,14 @@ def test_review_and_authorization_snapshots_serialize_nested_contracts():
         approval_id="approval-1",
         plan_fingerprint="plan-sha",
         code_fingerprint="code-sha",
+        round_count=2,
         authorized_at="2026-07-15T00:02:00Z",
         authorized_by="alice",
     )
 
     assert review.to_dict()["approval"]["decision"] == "approved"
     assert authorization.to_dict()["authorized"] is True
+    assert authorization.to_dict()["round_count"] == 2
 
 
 def _plan_snapshot() -> ExplorationPlanSnapshot:
@@ -158,6 +162,7 @@ def _plan_snapshot() -> ExplorationPlanSnapshot:
         primary_metric="roc_auc",
         target_metric=0.9,
         stop_conditions=("target reached",),
+        risks=("validation overfitting",),
         resource_limits={"max_minutes": 30},
         trusted_experience_ids=(),
         pending_experience_ids=(),

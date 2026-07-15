@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -198,6 +199,10 @@ class DomainCore:
         command: RecordExplorationPlanCommand,
     ) -> ExplorationPlanSnapshot:
         connection = self._load_connection(command.connection_path)
+        self._require_managed_code_root(
+            command.connection_path,
+            command.code_root,
+        )
         repository = self.memory_repository.open(
             connection.repository_path,
             actor_id=connection.actor_id,
@@ -221,6 +226,10 @@ class DomainCore:
         command: ApproveExplorationPlanCommand,
     ) -> ExplorationApprovalSnapshot:
         connection = self._load_connection(command.connection_path)
+        self._require_managed_code_root(
+            command.connection_path,
+            command.code_root,
+        )
         repository = self.memory_repository.open(
             connection.repository_path,
             actor_id=connection.actor_id,
@@ -252,7 +261,36 @@ class DomainCore:
             if latest is None:
                 return None
             selected_plan_id = latest.plan_id
-        return exploration.review(selected_plan_id, code_root)
+        self._require_managed_code_root(connection_path, code_root)
+        review = exploration.review(selected_plan_id, code_root)
+        if review.approval_state != "approved" or review.approval is None:
+            return replace(
+                review,
+                training_gate_state="blocked",
+                training_gate_reason=review.approval_state,
+            )
+        try:
+            dataset = self._require_confirmed_from_repository(
+                repository.repository_path,
+                review.plan.dataset_id,
+                review.plan.dataset_version,
+            )
+            self._require_approved_dataset_binding(
+                dataset,
+                review.plan,
+                review.approval,
+            )
+        except WorkspaceError as error:
+            return replace(
+                review,
+                training_gate_state="blocked",
+                training_gate_reason=error.code,
+            )
+        return replace(
+            review,
+            training_gate_state="authorized",
+            training_gate_reason=None,
+        )
 
     def authorize_training(
         self,
@@ -276,28 +314,16 @@ class DomainCore:
                     message="Formal exploration requires an approved current plan and code.",
                     next_action="Review and approve the current exploration plan before training.",
                 )
+            self._require_managed_code_root(
+                command.connection_path,
+                command.code_root,
+            )
             plan, approval = exploration.require_current_approval(
                 command.plan_id,
                 command.approval_id,
                 command.code_root,
             )
-            if (
-                plan.dataset_id != dataset.dataset_id
-                or plan.dataset_version != dataset.version
-                or plan.dataset_content_fingerprint
-                != dataset.content_fingerprint
-                or plan.dataset_version_fingerprint
-                != dataset.version_fingerprint
-                or approval.dataset_id != dataset.dataset_id
-                or approval.dataset_version != dataset.version
-                or approval.dataset_version_fingerprint
-                != dataset.version_fingerprint
-            ):
-                raise WorkspaceError(
-                    code="approved_dataset_mismatch",
-                    message="The approved exploration plan does not match the requested Dataset Version.",
-                    next_action="Select the approved Dataset Version or record and approve a new plan.",
-                )
+            self._require_approved_dataset_binding(dataset, plan, approval)
             authorized_at = self.clock() if self.clock is not None else _utc_now()
             return TrainingAuthorization(
                 authorized=True,
@@ -310,6 +336,7 @@ class DomainCore:
                 approval_id=approval.asset_id,
                 plan_fingerprint=plan.plan_fingerprint,
                 code_fingerprint=plan.code_fingerprint,
+                round_count=len(plan.rounds),
                 authorized_at=authorized_at,
                 authorized_by=connection.actor_id,
             )
@@ -342,6 +369,53 @@ class DomainCore:
             audit_id_factory=self.training_gate_audit_id_factory,
             clock=self.clock,
         )
+
+    @staticmethod
+    def _require_managed_code_root(
+        connection_path: Path,
+        code_root: Path,
+    ) -> Path:
+        workspace_root = connection_path.expanduser().resolve().parent
+        resolved_code_root = code_root.expanduser().resolve()
+        try:
+            resolved_code_root.relative_to(workspace_root)
+        except ValueError as error:
+            raise WorkspaceError(
+                code="unmanaged_code_root",
+                message="Candidate code root is outside the connected local workspace.",
+                next_action=(
+                    "Place candidate code beside the workspace connection or "
+                    "in one of its subdirectories."
+                ),
+            ) from error
+        return resolved_code_root
+
+    @staticmethod
+    def _require_approved_dataset_binding(
+        dataset: DatasetVersionSnapshot,
+        plan: ExplorationPlanSnapshot,
+        approval: ExplorationApprovalSnapshot,
+    ) -> None:
+        if (
+            plan.dataset_id != dataset.dataset_id
+            or plan.dataset_version != dataset.version
+            or plan.dataset_content_fingerprint != dataset.content_fingerprint
+            or plan.dataset_version_fingerprint != dataset.version_fingerprint
+            or approval.dataset_id != dataset.dataset_id
+            or approval.dataset_version != dataset.version
+            or approval.dataset_version_fingerprint != dataset.version_fingerprint
+        ):
+            raise WorkspaceError(
+                code="approved_dataset_mismatch",
+                message=(
+                    "The approved exploration plan does not match the requested "
+                    "Dataset Version."
+                ),
+                next_action=(
+                    "Select the approved Dataset Version or record and approve "
+                    "a new plan."
+                ),
+            )
 
     @staticmethod
     def _require_confirmed_from_repository(

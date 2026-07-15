@@ -74,6 +74,7 @@ def test_design_and_explore_record_parses_claude_plan_into_domain_command(
     assert command.dataset_id == "ds-1"
     assert command.dataset_version == 1
     assert command.rounds[1].optimization_direction == "feature_selection"
+    assert command.risks == ("feature selection can overfit",)
     assert command.trusted_experience_ids == ("experience-approved",)
     assert command.pending_experience_ids == ("experience-pending",)
     assert command.candidate_code_paths == ("train.py",)
@@ -161,6 +162,7 @@ def plan_payload():
             },
         ],
         "stop_conditions": ["target reached", "round budget exhausted"],
+        "risks": ["feature selection can overfit"],
         "resource_limits": {"max_minutes": 30, "max_parallel_jobs": 1},
         "trusted_experience_ids": ["experience-approved"],
         "pending_experience_ids": ["experience-pending"],

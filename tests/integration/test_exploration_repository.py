@@ -1,8 +1,12 @@
+import hashlib
 import json
 
 import pytest
 
-from src.domain.exploration_repository import ExplorationRepository
+from src.domain.exploration_repository import (
+    PLAN_CONTENT_FIELDS,
+    ExplorationRepository,
+)
 from src.domain.memory_repository import MemoryRepository
 from src.domain.models import (
     DatasetPreview,
@@ -72,6 +76,7 @@ class PlanningWorkspace:
                 ),
             ),
             "stop_conditions": ("target reached", "round budget exhausted"),
+            "risks": ("feature selection may overfit validation folds",),
             "resource_limits": {"max_minutes": 30, "max_parallel_jobs": 1},
             "trusted_experience_ids": ("experience-approved",),
             "pending_experience_ids": (
@@ -101,6 +106,9 @@ def test_record_plan_appends_events_without_sop_style_versions(planning_workspac
 
     assert first.asset_id == "plan-event-1"
     assert second.asset_id == "plan-event-2"
+    assert json.loads(
+        (planning_workspace.memory_root / second.asset_path).read_text(encoding="utf-8")
+    )["schema_version"] == 2
     assert not hasattr(first, "version")
     assert planning_workspace.repository.current("plan-1") == second
     assert planning_workspace.repository.list_plan_events("plan-1") == (
@@ -108,6 +116,35 @@ def test_record_plan_appends_events_without_sop_style_versions(planning_workspac
         second,
     )
     assert len(list((planning_workspace.memory_root / "sops").glob("**/*"))) == 0
+
+
+def test_current_plan_follows_event_causality_when_clock_and_ids_do_not_sort(
+    planning_workspace,
+):
+    event_ids = iter(("plan-event-z", "plan-event-a"))
+    planning_workspace.repository.event_id_factory = lambda: next(event_ids)
+
+    first = planning_workspace.record(user_direction="First direction")
+    second = planning_workspace.record(user_direction="Second direction")
+
+    assert second.previous_event_id == first.asset_id
+    assert planning_workspace.repository.current("plan-1") == second
+
+
+def test_concurrent_plan_event_heads_require_explicit_reconciliation(
+    planning_workspace,
+):
+    planning_workspace.record(user_direction="First direction")
+    second = planning_workspace.record(user_direction="Second direction")
+    second_path = planning_workspace.memory_root / second.asset_path
+    payload = json.loads(second_path.read_text(encoding="utf-8"))
+    payload["previous_event_id"] = None
+    second_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(WorkspaceError) as caught:
+        planning_workspace.repository.current("plan-1")
+
+    assert caught.value.code == "exploration_plan_conflict"
 
 
 def test_record_plan_keeps_experience_confidence_and_exclusions_separate(
@@ -132,6 +169,7 @@ def test_record_plan_uses_dataset_metric_and_fingerprints(planning_workspace):
     assert plan.dataset_version_fingerprint == "dataset-version-1"
     assert plan.primary_metric == "roc_auc"
     assert plan.target_metric == 0.91
+    assert plan.risks == ("feature selection may overfit validation folds",)
     assert len(plan.plan_fingerprint) == 64
     assert len(plan.code_fingerprint) == 64
 
@@ -228,6 +266,7 @@ def test_plan_or_code_change_makes_prior_approval_stale(planning_workspace):
         ({"user_direction": ""}, "incomplete_exploration_plan"),
         ({"rounds": ()}, "incomplete_exploration_plan"),
         ({"stop_conditions": ()}, "incomplete_exploration_plan"),
+        ({"risks": ()}, "incomplete_exploration_plan"),
         ({"resource_limits": {}}, "incomplete_exploration_plan"),
         ({"candidate_code_paths": ()}, "incomplete_exploration_plan"),
         (
@@ -297,6 +336,28 @@ def test_load_rejects_tampered_plan_fingerprint(planning_workspace):
     event_path = planning_workspace.memory_root / plan.asset_path
     payload = json.loads(event_path.read_text(encoding="utf-8"))
     payload["user_direction"] = "tampered"
+    event_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(WorkspaceError) as caught:
+        planning_workspace.repository.current(plan.plan_id)
+
+    assert caught.value.code == "invalid_exploration_plan"
+
+
+def test_load_rejects_invalid_structure_even_with_recomputed_fingerprint(
+    planning_workspace,
+):
+    plan = planning_workspace.record()
+    event_path = planning_workspace.memory_root / plan.asset_path
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    payload["rounds"][0]["round_number"] = 2
+    canonical = json.dumps(
+        {field: payload[field] for field in PLAN_CONTENT_FIELDS},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    payload["plan_fingerprint"] = hashlib.sha256(canonical).hexdigest()
     event_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(WorkspaceError) as caught:

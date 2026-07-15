@@ -261,6 +261,7 @@ def test_authoritative_explore_accepts_approved_plan_for_confirmed_dataset(
                 ),
             ),
             stop_conditions=("target reached",),
+            risks=("validation overfitting",),
             resource_limits={"max_minutes": 30},
             candidate_code_paths=("train.py",),
         )

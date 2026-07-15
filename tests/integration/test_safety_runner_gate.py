@@ -109,6 +109,7 @@ class ApprovingCore:
             approval_id=command.approval_id,
             plan_fingerprint="plan-sha",
             code_fingerprint="code-sha",
+            round_count=1,
             authorized_at="2026-07-15T00:00:00Z",
             authorized_by="alice",
         )

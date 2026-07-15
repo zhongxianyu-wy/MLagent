@@ -35,7 +35,7 @@ def test_explore_cli_passes_approved_binding_to_issue_five_seam(
             "dataset_version": 1,
             "dataset_content_fingerprint": "fingerprint-ds-1-v1",
             "dataset_version_fingerprint": "version-fingerprint-ds-1-v1",
-            "max_rounds": 2,
+            "max_rounds": 1,
             "manifest_path": "/team-memory/datasets/ds-1/v0001/manifest.json",
             "experiment_id": "explore-ds-1-v0001",
             "guidance_metric_name": "auc",
@@ -51,11 +51,41 @@ def test_explore_cli_passes_approved_binding_to_issue_five_seam(
                 "approval_id": "approval-1",
                 "plan_fingerprint": "plan-sha",
                 "code_fingerprint": "code-sha",
+                "round_count": 1,
                 "authorized_at": "2026-07-15T00:00:00Z",
                 "authorized_by": "alice",
             },
         }
     ]
+
+
+def test_authoritative_explore_ignores_unapproved_cli_round_override(
+    confirmed_domain_core,
+):
+    requests = []
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            "ds-1",
+            "--dataset-version",
+            "1",
+            "--plan-id",
+            "plan-1",
+            "--approval-id",
+            "approval-1",
+            "--code-root",
+            "/workspace/code",
+            "--max-rounds",
+            "not-an-approved-value",
+        ],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    assert exit_code == 0
+    assert requests[0]["max_rounds"] == 1
 
 
 def test_explore_cli_never_calls_execution_seam_when_authorization_fails(
@@ -93,3 +123,44 @@ def test_explore_cli_never_calls_execution_seam_when_authorization_fails(
     assert exit_code == 2
     assert requests == []
     assert "plan_approval_required" in capsys.readouterr().out
+
+
+def test_explore_cli_returns_structured_error_for_option_without_value(
+    confirmed_domain_core,
+    capsys,
+):
+    requests = []
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            "ds-1",
+            "--dataset-version",
+            "1",
+            "--plan-id",
+        ],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    assert exit_code == 2
+    assert requests == []
+    assert "invalid_arguments" in capsys.readouterr().out
+
+
+def test_explore_cli_returns_structured_error_for_missing_dataset_version_value(
+    confirmed_domain_core,
+    capsys,
+):
+    requests = []
+
+    exit_code = main(
+        ["explore", "--dataset-id", "ds-1", "--dataset-version"],
+        explore_factory=lambda request: requests.append(request) or 0,
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    assert exit_code == 2
+    assert requests == []
+    assert "invalid_arguments" in capsys.readouterr().out

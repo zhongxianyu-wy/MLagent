@@ -97,6 +97,7 @@ class ExplorationWorkspace:
                 ),
             ),
             "stop_conditions": ("target reached",),
+            "risks": ("validation overfitting",),
             "resource_limits": {"max_minutes": 30},
             "trusted_experience_ids": ("experience-approved",),
             "pending_experience_ids": ("experience-pending",),
@@ -212,8 +213,30 @@ def test_exact_approval_returns_binding_without_creating_run(
     assert authorization.approval_id == approval.asset_id
     assert authorization.plan_fingerprint == plan.plan_fingerprint
     assert authorization.code_fingerprint == plan.code_fingerprint
+    assert authorization.round_count == len(plan.rounds)
     assert list((exploration_workspace.memory_root / "runs").glob("**/*")) == []
     assert list((exploration_workspace.memory_root / "models").glob("**/*")) == []
+
+
+def test_review_reports_domain_training_readiness_without_writing_gate_audit(
+    exploration_workspace,
+):
+    exploration_workspace.record()
+    pending = exploration_workspace.core.get_exploration_review(
+        exploration_workspace.connection_path,
+        exploration_workspace.code_root,
+    )
+    exploration_workspace.approve()
+    approved = exploration_workspace.core.get_exploration_review(
+        exploration_workspace.connection_path,
+        exploration_workspace.code_root,
+    )
+
+    assert pending.training_gate_state == "blocked"
+    assert pending.training_gate_reason == "pending_review"
+    assert approved.training_gate_state == "authorized"
+    assert approved.training_gate_reason is None
+    assert exploration_workspace.audits() == []
 
 
 def test_plan_update_invalidates_prior_approval(exploration_workspace):
@@ -284,6 +307,59 @@ def test_approval_record_tampering_blocks_authorization(exploration_workspace):
 
     assert caught.value.code == "invalid_plan_approval"
     assert exploration_workspace.audits()[-1]["reason_code"] == "invalid_plan_approval"
+
+
+def test_invalid_plan_reference_is_audited_without_becoming_a_path(
+    exploration_workspace,
+):
+    exploration_workspace.record()
+
+    with pytest.raises(WorkspaceError) as caught:
+        exploration_workspace.authorize(
+            plan_id="../outside",
+            approval_id="approval-1",
+        )
+
+    assert caught.value.code == "invalid_exploration_id"
+    audit = exploration_workspace.audits()[-1]
+    assert audit["reason_code"] == "invalid_exploration_id"
+    assert audit["plan_id"] == "../outside"
+    assert not (exploration_workspace.memory_root.parent / "outside").exists()
+
+
+def test_domain_core_rejects_code_root_outside_local_workspace(
+    exploration_workspace,
+    tmp_path,
+):
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside-code"
+    outside_root.mkdir()
+    (outside_root / "train.py").write_text("print('outside')\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError) as caught:
+        exploration_workspace.record(code_root=outside_root)
+
+    assert caught.value.code == "unmanaged_code_root"
+
+
+def test_training_gate_audits_approved_request_with_unmanaged_code_root(
+    exploration_workspace,
+    tmp_path,
+):
+    plan = exploration_workspace.record()
+    approval = exploration_workspace.approve()
+    outside_root = tmp_path.parent / f"{tmp_path.name}-outside-approved-code"
+    outside_root.mkdir()
+    (outside_root / "train.py").write_text("print('outside')\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceError) as caught:
+        exploration_workspace.authorize(
+            plan_id=plan.plan_id,
+            approval_id=approval.asset_id,
+            code_root=outside_root,
+        )
+
+    assert caught.value.code == "unmanaged_code_root"
+    assert exploration_workspace.audits()[-1]["reason_code"] == "unmanaged_code_root"
 
 
 def write_pair(root: Path):

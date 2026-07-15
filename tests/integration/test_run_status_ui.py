@@ -75,6 +75,7 @@ def run_status_workspace(tmp_path, monkeypatch):
                 ),
             ),
             stop_conditions=("target reached", "round budget exhausted"),
+            risks=("validation overfitting",),
             resource_limits={"max_minutes": 30, "max_parallel_jobs": 1},
             trusted_experience_ids=("experience-approved",),
             pending_experience_ids=(
@@ -128,6 +129,7 @@ def test_run_status_renders_plan_confidence_code_and_approval(
     assert app.subheader[0].value == "Run Status"
     metrics = {(metric.label, metric.value) for metric in app.metric}
     assert ("Approval", "Pending review") in metrics
+    assert ("Training gate", "Blocked") in metrics
     assert ("Rounds", "2") in metrics
     assert ("Target", "0.91") in metrics
     markdown = "\n".join(item.value for item in app.markdown)
@@ -135,6 +137,7 @@ def test_run_status_renders_plan_confidence_code_and_approval(
     assert "Pending Experience (low confidence)" in markdown
     assert "Excluded Pending Experience" in markdown
     assert "feature_selection" in markdown
+    assert "Risks" in markdown
     assert app.code[0].value == run_status_workspace.training_code.strip()
     assert find_button(app, "Approve current plan and code") is not None
 
@@ -147,6 +150,10 @@ def test_run_status_approval_refreshes_to_approved(run_status_workspace):
     assert not app.exception
     assert any(
         metric.label == "Approval" and metric.value == "Approved"
+        for metric in app.metric
+    )
+    assert any(
+        metric.label == "Training gate" and metric.value == "Authorized"
         for metric in app.metric
     )
     assert find_button(app, "Approve current plan and code").disabled is True

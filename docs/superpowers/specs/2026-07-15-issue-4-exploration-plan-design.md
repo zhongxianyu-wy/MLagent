@@ -1,8 +1,8 @@
 # Issue #4 Exploration Planning And Approval Design
 
-> Date: 2026-07-15  
-> Status: User approved  
-> Base: `feat/issue-3-dataset-intake`  
+> Date: 2026-07-15
+> Status: User approved
+> Base: `feat/issue-3-dataset-intake`
 > Scope: GitHub Issue #4
 
 ## 1. Decision
@@ -32,10 +32,13 @@ library. Events capture only facts needed for review and execution:
 - Pending Experience references, visibly marked low confidence;
 - pending references excluded by the user;
 - candidate code paths and content fingerprints;
+- risks identified for review, without scientific scoring;
 - approval, invalidation, and blocked-execution decisions.
 
 The current plan is reconstructed from these events. Editing the plan or candidate code appends a
-new event and changes its fingerprint. It does not create a reusable plan version.
+new event and changes its fingerprint. Each event references its causal predecessor so equal or
+non-monotonic timestamps cannot select an older event. Concurrent Git heads require explicit
+reconciliation and cannot authorize training. This does not create a reusable plan version.
 
 ### 2.2 SOP Strategy
 
@@ -82,6 +85,7 @@ The current plan record contains:
 - each round's hypothesis, optimization direction, and intended changes;
 - primary evaluation metric and target copied from the confirmed Dataset Version;
 - stop conditions and resource limits;
+- risks for human review;
 - separately labeled Trusted and Pending Experience references;
 - excluded Pending Experience references;
 - candidate code file paths and aggregate code fingerprint;
@@ -123,6 +127,11 @@ approved binding only when:
 6. all candidate code paths remain inside managed roots.
 
 CLI, PreToolUse Hook, and UI call this same operation. Adapters do not reimplement approval rules.
+The managed code root must be the local workspace containing `.mlagent-workspace.json` or one of
+its descendants. The committed Claude Code `PreToolUse` registration converts authoritative
+`python -m src.agent.main explore` Bash calls into the same Domain Core authorization command.
+Run Status uses a side-effect-free Domain Core readiness query that shares the exact Dataset
+Version binding rule; its explicit verification action still calls the authoritative operation.
 Issue #4 stops after authorization; Issue #5 owns real Run and Training Instance execution.
 
 The retained legacy `--manifest-path` prototype route is not a v0.4 authoritative Run path and
@@ -151,6 +160,7 @@ Before a Run exists, Run Status shows the planning state:
 - expected round count;
 - baseline and round-level optimization directions;
 - stop conditions and resource limits;
+- risks;
 - Trusted and low-confidence Pending Experience references;
 - excluded Pending Experience references;
 - candidate code file list and read-only code preview;
@@ -166,6 +176,9 @@ direct file editing, or a second approval system.
 - Missing required plan section: keep the plan unapproved and identify the missing field.
 - Unsafe or missing code path: reject recording or authorization without reading outside managed
   roots.
+- Code root outside the connected local workspace: reject as `unmanaged_code_root`.
+- Concurrent planning-event heads after Git sync: reject as `exploration_plan_conflict` until
+  reconciled.
 - Changed plan or code after approval: report `approval_stale` and require reapproval.
 - Missing approval: report `plan_approval_required`.
 - Dataset mismatch: report `approved_dataset_mismatch`.
@@ -186,7 +199,9 @@ Tests exercise public behavior through Domain Core and adapters:
 8. Blocked requests create minimal audit events and no Run or Training Instance.
 9. Run Status renders plan details, confidence labels, code preview, and approval readiness on desktop
    and mobile layouts.
-10. Existing Issue #2 and #3 tests remain green.
+10. The registered Claude Code `PreToolUse` adapter blocks stale or missing approval before Bash
+    execution.
+11. Existing Issue #2 and #3 tests remain green.
 
 ## 11. Non-Goals
 

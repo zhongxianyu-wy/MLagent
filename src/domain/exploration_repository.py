@@ -24,7 +24,7 @@ from src.domain.models import (
 )
 
 
-EXPLORATION_SCHEMA_VERSION = 1
+EXPLORATION_SCHEMA_VERSION = 2
 PLAN_ROOT = Path("raw-records/exploration-plans")
 APPROVAL_ROOT = Path("approvals/exploration-plans")
 GATE_AUDIT_ROOT = Path("approvals/training-gates")
@@ -44,6 +44,7 @@ PLAN_CONTENT_FIELDS = (
     "primary_metric",
     "target_metric",
     "stop_conditions",
+    "risks",
     "resource_limits",
     "trusted_experience_ids",
     "pending_experience_ids",
@@ -110,6 +111,12 @@ class ExplorationRepository:
             command.code_root,
             command.candidate_code_paths,
         )
+        existing_events = self.list_plan_events(command.plan_id)
+        previous_event_id = (
+            self._current_event(command.plan_id, existing_events).asset_id
+            if existing_events
+            else None
+        )
         event_id = self._new_id(self.event_id_factory, "plan event")
         created_at = self._timestamp()
         payload: dict[str, Any] = {
@@ -118,6 +125,7 @@ class ExplorationRepository:
             "schema_version": EXPLORATION_SCHEMA_VERSION,
             "event_type": "plan_recorded",
             "state": "pending_review",
+            "previous_event_id": previous_event_id,
             "plan_id": command.plan_id,
             "planning_session_id": command.planning_session_id,
             "dataset_id": dataset.dataset_id,
@@ -140,6 +148,7 @@ class ExplorationRepository:
             "primary_metric": dataset.primary_metric,
             "target_metric": dataset.target_metric,
             "stop_conditions": [item.strip() for item in command.stop_conditions],
+            "risks": [item.strip() for item in command.risks],
             "resource_limits": dict(command.resource_limits),
             "trusted_experience_ids": list(command.trusted_experience_ids),
             "pending_experience_ids": list(command.pending_experience_ids),
@@ -168,7 +177,7 @@ class ExplorationRepository:
                 message=f"No exploration plan record exists for {plan_id}.",
                 next_action="Record the Claude-completed exploration plan before review.",
             )
-        return max(events, key=lambda item: (item.created_at, item.asset_id))
+        return self._current_event(plan_id, events)
 
     def latest(self) -> ExplorationPlanSnapshot | None:
         root = self.repository_path / PLAN_ROOT
@@ -179,7 +188,9 @@ class ExplorationRepository:
         for family in sorted(root.iterdir()):
             self._validate_memory_path(family)
             if family.is_dir() and SAFE_ID_PATTERN.fullmatch(family.name):
-                plans.extend(self.list_plan_events(family.name))
+                events = self.list_plan_events(family.name)
+                if events:
+                    plans.append(self._current_event(family.name, events))
         if not plans:
             return None
         return max(plans, key=lambda item: (item.created_at, item.asset_id))
@@ -199,6 +210,56 @@ class ExplorationRepository:
             if path.is_file() and path.suffix == ".json":
                 events.append(self._load_plan(path, plan_id))
         return tuple(sorted(events, key=lambda item: (item.created_at, item.asset_id)))
+
+    @staticmethod
+    def _current_event(
+        plan_id: str,
+        events: tuple[ExplorationPlanSnapshot, ...],
+    ) -> ExplorationPlanSnapshot:
+        by_id = {event.asset_id: event for event in events}
+        for event in events:
+            predecessor = event.previous_event_id
+            if predecessor is not None and predecessor not in by_id:
+                ExplorationRepository._invalid_plan(
+                    f"event {event.asset_id} has a missing predecessor"
+                )
+        predecessors = {
+            event.previous_event_id
+            for event in events
+            if event.previous_event_id is not None
+        }
+        heads = [event for event in events if event.asset_id not in predecessors]
+        if len(heads) != 1:
+            raise WorkspaceError(
+                code="exploration_plan_conflict",
+                message=f"Exploration plan {plan_id} has concurrent event heads.",
+                next_action=(
+                    "Reconcile the planning events and record one reviewed "
+                    "continuation before training."
+                ),
+            )
+
+        visited: set[str] = set()
+        cursor: ExplorationPlanSnapshot | None = heads[0]
+        while cursor is not None:
+            if cursor.asset_id in visited:
+                ExplorationRepository._invalid_plan("event ancestry contains a cycle")
+            visited.add(cursor.asset_id)
+            cursor = (
+                by_id[cursor.previous_event_id]
+                if cursor.previous_event_id is not None
+                else None
+            )
+        if len(visited) != len(events):
+            raise WorkspaceError(
+                code="exploration_plan_conflict",
+                message=f"Exploration plan {plan_id} has disconnected event history.",
+                next_action=(
+                    "Reconcile the planning events and record one reviewed "
+                    "continuation before training."
+                ),
+            )
+        return heads[0]
 
     def approve_current(
         self,
@@ -284,18 +345,27 @@ class ExplorationRepository:
         plan = self.current(plan_id)
         previews = self._code_previews(code_root, plan.candidate_code_files)
         approvals = self._list_approvals(plan_id)
-        approval = approvals[-1] if approvals else None
         code_is_current = all(item.state == "current" for item in previews)
-        if approval is None:
-            state = "pending_review"
-        elif (
-            approval.plan_event_id == plan.asset_id
+        matching_approvals = tuple(
+            approval
+            for approval in approvals
+            if approval.plan_event_id == plan.asset_id
             and approval.dataset_version_fingerprint
             == plan.dataset_version_fingerprint
             and approval.plan_fingerprint == plan.plan_fingerprint
             and approval.code_fingerprint == plan.code_fingerprint
-            and code_is_current
-        ):
+            and approval.decision == "approved"
+        )
+        approval = (
+            matching_approvals[-1]
+            if matching_approvals
+            else approvals[-1]
+            if approvals
+            else None
+        )
+        if approval is None:
+            state = "pending_review"
+        elif matching_approvals and code_is_current:
             state = "approved"
         else:
             state = "approval_stale"
@@ -368,10 +438,6 @@ class ExplorationRepository:
                 message="The blocked training attempt lacks required audit fields.",
                 next_action="Retry through a supported formal-training entry point.",
             )
-        if plan_id is not None:
-            self._validate_id(plan_id, "plan ID")
-        if approval_id is not None:
-            self._validate_id(approval_id, "approval ID")
         audit_id = self._new_id(self.audit_id_factory, "training gate audit")
         payload: dict[str, Any] = {
             "asset_type": "training_gate_audit",
@@ -381,8 +447,8 @@ class ExplorationRepository:
             "entry_point": entry_point,
             "dataset_id": dataset_id,
             "dataset_version": dataset_version,
-            "plan_id": plan_id,
-            "approval_id": approval_id,
+            "plan_id": _audit_reference(plan_id),
+            "approval_id": _audit_reference(approval_id),
             "reason_code": reason_code,
             "next_action": next_action,
             "created_at": self._timestamp(),
@@ -420,6 +486,7 @@ class ExplorationRepository:
             "schema_version",
             "event_type",
             "state",
+            "previous_event_id",
             "plan_fingerprint",
             "created_at",
             "created_by",
@@ -530,6 +597,7 @@ class ExplorationRepository:
             not all(isinstance(item, str) and item.strip() for item in required_text)
             or not command.rounds
             or not command.stop_conditions
+            or not command.risks
             or not command.resource_limits
             or not command.candidate_code_paths
         ):
@@ -544,9 +612,10 @@ class ExplorationRepository:
                 or not all(change.strip() for change in item.intended_changes)
             ):
                 ExplorationRepository._incomplete_plan()
-        if not all(
-            isinstance(item, str) and item.strip()
-            for item in command.stop_conditions
+        if any(
+            not all(isinstance(item, str) and item.strip() for item in group)
+            or len(group) != len(set(group))
+            for group in (command.stop_conditions, command.risks)
         ):
             ExplorationRepository._incomplete_plan()
         for key, value in command.resource_limits.items():
@@ -805,13 +874,39 @@ class ExplorationRepository:
             for field in string_fields
         ):
             ExplorationRepository._invalid_plan("string fields are invalid")
+        if any(
+            SAFE_ID_PATTERN.fullmatch(payload[field]) is None
+            for field in (
+                "asset_id",
+                "plan_id",
+                "planning_session_id",
+                "dataset_id",
+            )
+        ):
+            ExplorationRepository._invalid_plan("stable IDs are invalid")
+        previous_event_id = payload["previous_event_id"]
+        if (
+            previous_event_id is not None
+            and (
+                not isinstance(previous_event_id, str)
+                or SAFE_ID_PATTERN.fullmatch(previous_event_id) is None
+                or previous_event_id == payload["asset_id"]
+            )
+        ):
+            ExplorationRepository._invalid_plan("event predecessor is invalid")
         if (
             type(payload["dataset_version"]) is not int
+            or payload["dataset_version"] <= 0
             or type(payload["target_metric"]) not in {int, float}
+            or not math.isfinite(payload["target_metric"])
             or not isinstance(payload["rounds"], list)
             or not payload["rounds"]
             or not isinstance(payload["stop_conditions"], list)
+            or not payload["stop_conditions"]
+            or not isinstance(payload["risks"], list)
+            or not payload["risks"]
             or not isinstance(payload["resource_limits"], dict)
+            or not payload["resource_limits"]
             or not isinstance(payload["candidate_code_files"], list)
             or not payload["candidate_code_files"]
         ):
@@ -821,14 +916,37 @@ class ExplorationRepository:
             "pending_experience_ids",
             "excluded_pending_experience_ids",
             "stop_conditions",
+            "risks",
         )
         if any(
             not isinstance(payload[field], list)
-            or not all(isinstance(item, str) for item in payload[field])
+            or not all(
+                isinstance(item, str) and item.strip()
+                for item in payload[field]
+            )
+            or len(payload[field]) != len(set(payload[field]))
             for field in list_fields
         ):
             ExplorationRepository._invalid_plan("list fields are invalid")
-        for item in payload["rounds"]:
+        trusted = set(payload["trusted_experience_ids"])
+        pending = set(payload["pending_experience_ids"])
+        excluded = set(payload["excluded_pending_experience_ids"])
+        if trusted & pending or not excluded.issubset(pending):
+            ExplorationRepository._invalid_plan(
+                "experience confidence references are inconsistent"
+            )
+        for key, value in payload["resource_limits"].items():
+            valid_value = (
+                isinstance(value, str)
+                and bool(value.strip())
+                or type(value) in {int, float}
+                and math.isfinite(value)
+            )
+            if not isinstance(key, str) or not key.strip() or not valid_value:
+                ExplorationRepository._invalid_plan(
+                    "resource limit fields are invalid"
+                )
+        for expected_number, item in enumerate(payload["rounds"], start=1):
             if (
                 not isinstance(item, dict)
                 or set(item)
@@ -839,23 +957,44 @@ class ExplorationRepository:
                     "intended_changes",
                 }
                 or type(item["round_number"]) is not int
+                or item["round_number"] != expected_number
                 or not isinstance(item["hypothesis"], str)
+                or not item["hypothesis"].strip()
                 or not isinstance(item["optimization_direction"], str)
+                or not item["optimization_direction"].strip()
                 or not isinstance(item["intended_changes"], list)
+                or not item["intended_changes"]
                 or not all(
-                    isinstance(change, str) for change in item["intended_changes"]
+                    isinstance(change, str) and change.strip()
+                    for change in item["intended_changes"]
                 )
             ):
                 ExplorationRepository._invalid_plan("round fields are invalid")
+        code_paths: set[str] = set()
         for item in payload["candidate_code_files"]:
             if (
                 not isinstance(item, dict)
                 or set(item) != {"path", "sha256", "size_bytes"}
                 or not isinstance(item["path"], str)
+                or not item["path"].strip()
+                or Path(item["path"]).is_absolute()
+                or ".." in Path(item["path"]).parts
                 or not isinstance(item["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
                 or type(item["size_bytes"]) is not int
+                or item["size_bytes"] < 0
+                or item["size_bytes"] >= MAX_CODE_FILE_BYTES
+                or item["path"] in code_paths
             ):
                 ExplorationRepository._invalid_plan("code file fields are invalid")
+            code_paths.add(item["path"])
+        if (
+            re.fullmatch(r"[0-9a-f]{64}", payload["code_fingerprint"])
+            is None
+            or re.fullmatch(r"[0-9a-f]{64}", payload["plan_fingerprint"])
+            is None
+        ):
+            ExplorationRepository._invalid_plan("fingerprint fields are invalid")
 
     @staticmethod
     def _plan_snapshot(
@@ -885,6 +1024,7 @@ class ExplorationRepository:
             primary_metric=payload["primary_metric"],
             target_metric=payload["target_metric"],
             stop_conditions=tuple(payload["stop_conditions"]),
+            risks=tuple(payload["risks"]),
             resource_limits=dict(payload["resource_limits"]),
             trusted_experience_ids=tuple(payload["trusted_experience_ids"]),
             pending_experience_ids=tuple(payload["pending_experience_ids"]),
@@ -904,6 +1044,7 @@ class ExplorationRepository:
             state=payload["state"],
             created_at=payload["created_at"],
             created_by=payload["created_by"],
+            previous_event_id=payload["previous_event_id"],
         )
 
     @staticmethod
@@ -970,7 +1111,10 @@ class ExplorationRepository:
         raise WorkspaceError(
             code="incomplete_exploration_plan",
             message="The exploration plan is missing a required review section.",
-            next_action="Complete direction, baseline, rounds, stops, resources, and candidate code before recording.",
+            next_action=(
+                "Complete direction, baseline, rounds, stops, risks, resources, "
+                "and candidate code before recording."
+            ),
         )
 
     @staticmethod
@@ -1034,6 +1178,16 @@ def _fingerprint(payload: Any) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _audit_reference(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else repr(value)
+    if len(text) <= 200:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def _utc_now() -> str:

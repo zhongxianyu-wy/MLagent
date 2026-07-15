@@ -43,6 +43,7 @@ the opportunity to inspect both plan and code in the read-only Run Status view.
     }
   ],
   "stop_conditions": ["Target reached", "Round budget exhausted"],
+  "risks": ["Validation overfitting", "Class imbalance sensitivity"],
   "resource_limits": {"max_minutes": 30, "max_parallel_jobs": 1},
   "trusted_experience_ids": [],
   "pending_experience_ids": [],

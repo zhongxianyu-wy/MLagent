@@ -184,6 +184,7 @@ class RecordExplorationPlanCommand:
     baseline_hypothesis: str
     rounds: tuple[ExplorationRound, ...]
     stop_conditions: tuple[str, ...]
+    risks: tuple[str, ...]
     resource_limits: dict[str, str | int | float]
     trusted_experience_ids: tuple[str, ...] = ()
     pending_experience_ids: tuple[str, ...] = ()
@@ -225,6 +226,7 @@ class ExplorationPlanSnapshot:
     primary_metric: str
     target_metric: float
     stop_conditions: tuple[str, ...]
+    risks: tuple[str, ...]
     resource_limits: dict[str, str | int | float]
     trusted_experience_ids: tuple[str, ...]
     pending_experience_ids: tuple[str, ...]
@@ -235,6 +237,7 @@ class ExplorationPlanSnapshot:
     state: str
     created_at: str
     created_by: str
+    previous_event_id: str | None = None
     asset_type: str = "exploration_plan_event"
 
     def to_dict(self) -> dict[str, Any]:
@@ -279,6 +282,8 @@ class ExplorationReviewSnapshot:
     approval: ExplorationApprovalSnapshot | None
     approval_state: str
     code_previews: tuple[CandidateCodePreview, ...]
+    training_gate_state: str = "blocked"
+    training_gate_reason: str | None = "pending_review"
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -296,6 +301,7 @@ class TrainingAuthorization:
     approval_id: str
     plan_fingerprint: str
     code_fingerprint: str
+    round_count: int
     authorized_at: str
     authorized_by: str
 

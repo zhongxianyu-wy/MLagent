@@ -572,38 +572,38 @@ git commit -m "feat(ui): review and approve exploration plans"
 **Files:**
 - Modify only when a review finding requires a scoped correction.
 
-- [ ] **Step 1: Prove no plan-version concept entered production code**
+- [x] **Step 1: Prove no plan-version concept entered production code**
 
 Run: `rg -n "ExplorationPlanVersion|exploration_plan_version|plan_version|方案版本" src .claude/skills/design-and-explore tests/unit/test_exploration_models.py tests/contract/test_domain_core_exploration_plan.py tests/integration/test_exploration_repository.py`
 
 Expected: no production match; the intentional negative assertion in the model test may match only its test name.
 
-- [ ] **Step 2: Run focused Issue #4 suite**
+- [x] **Step 2: Run focused Issue #4 suite**
 
 Run: `./.venv/bin/pytest tests/unit/test_exploration_models.py tests/integration/test_exploration_repository.py tests/contract/test_domain_core_exploration_plan.py tests/integration/test_design_and_explore_cli.py tests/integration/test_explore_cli.py tests/contract/test_safety_hooks.py tests/integration/test_safety_runner_gate.py tests/contract/test_ui_shell.py tests/integration/test_run_status_ui.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run the complete regression suite**
+- [x] **Step 3: Run the complete regression suite**
 
 Run: `./.venv/bin/pytest -q`
 
 Expected: all tests pass; baseline before Issue #4 was 258 tests.
 
-- [ ] **Step 4: Start the local Streamlit server and verify desktop/mobile views**
+- [x] **Step 4: Start the local Streamlit server and verify desktop/mobile views**
 
 Run: `MLAGENT_WORKSPACE_CONFIG=/private/tmp/mlagent-issue4/.mlagent-workspace.json MLAGENT_CODE_ROOT=/private/tmp/mlagent-issue4/code ./.venv/bin/streamlit run src/ui/app.py --server.headless true --server.port 8501`
 
 Use the in-app browser at `http://127.0.0.1:8501` to inspect Run Status at desktop and mobile widths. Verify no overlapping text, plan and confidence sections are readable, the code preview is non-editable, and the approval state refreshes.
 
-- [ ] **Step 5: Request and address code review**
+- [x] **Step 5: Request and address code review**
 
 Review the branch against `430015a` and the approved design for security, bypass routes, stale approval handling, event immutability, minimum-record discipline, and tests. Apply only evidence-backed fixes, then rerun the affected tests and the complete suite.
 
 - [ ] **Step 6: Commit final review fixes if any**
 
 ```bash
-git add src .claude/skills/design-and-explore tests
+git add src .claude tests docs/superpowers
 git commit -m "fix(exploration): close approval review gaps"
 ```
 
@@ -612,3 +612,23 @@ git commit -m "fix(exploration): close approval review gaps"
 Run: `git push -u origin feat/issue-4-exploration-plan`
 
 Expected: branch is available remotely with implementation and verification evidence; Issue #4 is ready for human review and remains distinct from Issue #5 training execution.
+
+## Review Hardening Addendum
+
+The final two-axis review added the following acceptance corrections without changing the approved
+product boundary:
+
+- planning events carry causal predecessor references; concurrent Git heads block authorization;
+- candidate code roots are anchored to the local workspace connection boundary;
+- plan records include reviewable risks required by canonical PRD FR-030;
+- `.claude/settings.json` registers a real Bash `PreToolUse` adapter backed by the shared Domain
+  Core authorization operation;
+- Run Status displays risks and the current training-gate state directly.
+
+### UI Acceptance Evidence
+
+On 2026-07-15 the in-app Playwright browser inspected the approved Run Status fixture at
+`1280x720` and `390x844`. Both views rendered the two exploration rounds, risks, confidence-labeled
+experience references, read-only code, and `Training gate: Authorized`. At both widths the document
+scroll width equaled the viewport width, no text overlap was observed, the Run Status anchor was
+`#run-status`, and no post-start local application console errors were recorded.

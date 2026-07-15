@@ -75,7 +75,7 @@ def main() -> None:
             st.metric(CONTEXT_LABELS[key], value)
 
     st.divider()
-    st.subheader(selected_module)
+    st.subheader(selected_module, anchor=_module_anchor(selected_module))
     st.caption(shell.module_status[selected_module])
 
     if selected_module == "Dataset Overview":
@@ -90,6 +90,10 @@ def main() -> None:
 
     for issue in shell.issues:
         st.warning(f"{issue['message']} {issue['next_action']}")
+
+
+def _module_anchor(module_name: str) -> str:
+    return module_name.lower().replace(" ", "-")
 
 
 def _render_dataset_overview(
@@ -246,9 +250,11 @@ def _render_run_status(
         "approved": "Approved",
         "approval_stale": "Approval stale",
     }.get(review.approval_state, "Failed")
-    summary_columns = st.columns(4)
+    training_gate = review.training_gate_state.capitalize()
+    summary_columns = st.columns(5)
     summary = (
         ("Approval", approval_label),
+        ("Training gate", training_gate),
         ("Dataset", f"{plan.dataset_id} v{plan.dataset_version}"),
         ("Rounds", str(len(plan.rounds))),
         ("Target", f"{plan.target_metric:g}"),
@@ -272,7 +278,7 @@ def _render_run_status(
         st.write(round_plan.hypothesis)
         st.caption(" · ".join(round_plan.intended_changes))
 
-    constraint_columns = st.columns(2)
+    constraint_columns = st.columns(3)
     with constraint_columns[0]:
         st.markdown("**Stop conditions**")
         st.dataframe(
@@ -281,6 +287,13 @@ def _render_run_status(
             width="stretch",
         )
     with constraint_columns[1]:
+        st.markdown("**Risks**")
+        st.dataframe(
+            pd.DataFrame({"Risk": list(plan.risks)}),
+            hide_index=True,
+            width="stretch",
+        )
+    with constraint_columns[2]:
         st.markdown("**Resource limits**")
         st.dataframe(
             pd.DataFrame(
