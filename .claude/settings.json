@@ -1,5 +1,30 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/mlagent-session-start.sh\"",
+            "timeout": 60,
+            "statusMessage": "Synchronizing MLagent team memory"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/mlagent-session-stop.sh\"",
+            "timeout": 60,
+            "statusMessage": "Committing MLagent managed memory"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash",
