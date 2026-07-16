@@ -283,6 +283,23 @@ class RunRepository:
             self._publish_directory(final_root, encoded, capacity)
             return self._load_code_revision(manifest_path, run_id)
 
+    def load_code_revision(
+        self,
+        run_id: str,
+        code_fingerprint: str,
+    ) -> FrozenCodeRevisionSnapshot:
+        self._validate_id(run_id, "Run ID")
+        self._validate_id(code_fingerprint, "code fingerprint")
+        manifest_path = (
+            self.repository_path
+            / RUN_ROOT
+            / run_id
+            / "code-revisions"
+            / code_fingerprint
+            / "manifest.json"
+        )
+        return self._load_code_revision(manifest_path, run_id)
+
     def prepare_instance(
         self,
         spec: InstancePreparationSpec,

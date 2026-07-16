@@ -1997,6 +1997,7 @@ version = "0.4.0"
 source = { virtual = "." }
 dependencies = [
     { name = "chromadb" },
+    { name = "joblib" },
     { name = "mem0ai" },
     { name = "mlflow" },
     { name = "nbformat" },
@@ -2016,6 +2017,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "chromadb", specifier = ">=0.6.0" },
+    { name = "joblib", specifier = ">=1.4.0" },
     { name = "mem0ai", specifier = ">=0.1.0" },
     { name = "mlflow", specifier = ">=2.19.0" },
     { name = "nbformat", specifier = ">=5.10.0" },
