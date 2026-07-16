@@ -107,6 +107,7 @@ def test_review_and_authorization_snapshots_serialize_nested_contracts():
         dataset_version_fingerprint="version-1",
         plan_fingerprint="plan-sha",
         code_fingerprint="code-sha",
+        approval_fingerprint="approval-sha",
         decision="approved",
         created_at="2026-07-15T00:01:00Z",
         created_by="alice",

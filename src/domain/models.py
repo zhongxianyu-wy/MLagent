@@ -258,6 +258,7 @@ class ExplorationApprovalSnapshot:
     dataset_version_fingerprint: str
     plan_fingerprint: str
     code_fingerprint: str
+    approval_fingerprint: str
     decision: str
     created_at: str
     created_by: str

@@ -31,6 +31,7 @@ RUN_SCHEMA_VERSION = 1
 RUN_EVENT_ROOT = Path("raw-records/runs")
 RUN_ROOT = Path("runs")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
+SAFE_PATH_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 TERMINAL_RUN_STATES = {"completed", "failed", "timed_out", "stopped"}
 TERMINAL_INSTANCE_STATES = {"completed", "failed", "timed_out", "stopped"}
 MODEL_RETENTION_REASONS = {"baseline", "stage_best", "human_marked"}
@@ -57,6 +58,7 @@ ALLOWED_EVENT_FIELDS = {
     "primary_metric_name",
     "target_metric_value",
     "expected_round_count",
+    "human_marked_rounds",
     "instance_id",
     "round_number",
     "parent_instance_id",
@@ -93,6 +95,7 @@ class RunStartSpec:
     primary_metric_name: str
     target_metric_value: float
     expected_round_count: int
+    human_marked_rounds: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,7 @@ class RunRepository:
                 "primary_metric_name": spec.primary_metric_name,
                 "target_metric_value": float(spec.target_metric_value),
                 "expected_round_count": spec.expected_round_count,
+                "human_marked_rounds": list(spec.human_marked_rounds),
                 "evidence_refs": [],
             },
         )
@@ -223,7 +227,7 @@ class RunRepository:
         capacity: CapacityStatus,
     ) -> FrozenCodeRevisionSnapshot:
         self._validate_id(run_id, "Run ID")
-        self._validate_id(code_fingerprint, "code fingerprint")
+        self._validate_path_token(code_fingerprint, "code fingerprint")
         self._validate_actor(actor_id)
         if not candidate_code_files:
             self._invalid_code_revision("approved code file list is empty")
@@ -289,7 +293,7 @@ class RunRepository:
         code_fingerprint: str,
     ) -> FrozenCodeRevisionSnapshot:
         self._validate_id(run_id, "Run ID")
-        self._validate_id(code_fingerprint, "code fingerprint")
+        self._validate_path_token(code_fingerprint, "code fingerprint")
         manifest_path = (
             self.repository_path
             / RUN_ROOT
@@ -916,6 +920,39 @@ class RunRepository:
             recovery_actions=recovery_actions,
         )
 
+    def list_statuses(self) -> tuple[RunStatusSnapshot, ...]:
+        root = self.repository_path / RUN_EVENT_ROOT
+        self._validate_path(root, managed=True)
+        if not root.is_dir():
+            return ()
+        run_ids = []
+        for path in sorted(root.iterdir()):
+            if not path.is_dir() or SAFE_ID_PATTERN.fullmatch(path.name) is None:
+                raise WorkspaceError(
+                    code="invalid_run_event",
+                    message="Run event directory contains an invalid Run identity.",
+                    next_action="Restore the append-only Run records from Git.",
+                )
+            run_ids.append(path.name)
+        statuses = [self.status(run_id) for run_id in run_ids]
+        return tuple(
+            sorted(
+                statuses,
+                key=lambda item: (item.updated_at, item.run_id),
+                reverse=True,
+            )
+        )
+
+    def load_run_start(self, run_id: str) -> dict[str, Any]:
+        return json.loads(json.dumps(self._start_payload(run_id)))
+
+    def list_instances(
+        self,
+        run_id: str,
+    ) -> tuple[TrainingInstanceSnapshot, ...]:
+        self._start_payload(run_id)
+        return self._instances(run_id)
+
     def recover_run(
         self,
         run_id: str,
@@ -1427,6 +1464,13 @@ class RunRepository:
             or spec.expected_round_count < 1
             or not spec.stop_conditions
             or not 0 <= float(spec.target_metric_value) <= 1
+            or len(set(spec.human_marked_rounds))
+            != len(spec.human_marked_rounds)
+            or any(
+                type(round_number) is not int
+                or not 1 <= round_number <= spec.expected_round_count
+                for round_number in spec.human_marked_rounds
+            )
         ):
             raise WorkspaceError(
                 code="invalid_run_start",
@@ -1670,6 +1714,18 @@ class RunRepository:
                 code="invalid_run_id",
                 message=f"{label} is invalid: {value!r}.",
                 next_action="Use a stable ID with letters, numbers, dots, underscores, or hyphens.",
+            )
+
+    @staticmethod
+    def _validate_path_token(value: str, label: str) -> None:
+        if (
+            not isinstance(value, str)
+            or SAFE_PATH_TOKEN_PATTERN.fullmatch(value) is None
+        ):
+            raise WorkspaceError(
+                code="invalid_run_path_token",
+                message=f"{label} is invalid: {value!r}.",
+                next_action="Use a stable alphanumeric fingerprint or path token.",
             )
 
     @staticmethod

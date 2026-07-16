@@ -179,6 +179,26 @@ class ExplorationRepository:
             )
         return self._current_event(plan_id, events)
 
+    def load_plan_event(
+        self,
+        plan_id: str,
+        event_id: str,
+    ) -> ExplorationPlanSnapshot:
+        self._validate_id(plan_id, "plan ID")
+        self._validate_id(event_id, "plan event ID")
+        matches = tuple(
+            event
+            for event in self.list_plan_events(plan_id)
+            if event.asset_id == event_id
+        )
+        if len(matches) != 1:
+            raise WorkspaceError(
+                code="exploration_plan_event_not_found",
+                message=f"Exploration plan event does not exist: {event_id}.",
+                next_action="Restore the exact approved plan event from Git.",
+            )
+        return matches[0]
+
     def latest(self) -> ExplorationPlanSnapshot | None:
         root = self.repository_path / PLAN_ROOT
         self._validate_memory_path(root)
@@ -1062,6 +1082,7 @@ class ExplorationRepository:
             dataset_version_fingerprint=payload["dataset_version_fingerprint"],
             plan_fingerprint=payload["plan_fingerprint"],
             code_fingerprint=payload["code_fingerprint"],
+            approval_fingerprint=payload["approval_fingerprint"],
             decision=payload["decision"],
             created_at=payload["created_at"],
             created_by=payload["created_by"],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -20,17 +21,24 @@ from src.domain.models import (
     ConfirmDatasetCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExecuteExplorationCommand,
     ExplorationApprovalSnapshot,
     ExplorationPlanSnapshot,
     ExplorationReviewSnapshot,
     IndexSummary,
     InspectDatasetCommand,
     RecordExplorationPlanCommand,
+    RecoverRunCommand,
+    RequestRunStopCommand,
+    RunStatusSnapshot,
     TrainingAuthorization,
     WorkspaceConnection,
     WorkspaceError,
     WorkspaceSnapshot,
 )
+from src.domain.run_execution import TrainingRunCoordinator
+from src.domain.run_repository import RunRepository
+from src.training.executor import SubprocessTrainingExecutor
 
 
 class DomainCore:
@@ -41,12 +49,21 @@ class DomainCore:
         exploration_event_id_factory: Callable[[], str] | None = None,
         exploration_approval_id_factory: Callable[[], str] | None = None,
         training_gate_audit_id_factory: Callable[[], str] | None = None,
+        run_id_factory: Callable[[], str] | None = None,
+        run_event_id_factory: Callable[[], str] | None = None,
+        training_instance_id_factory: Callable[[], str] | None = None,
+        training_executor_factory: Callable[[], SubprocessTrainingExecutor]
+        | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
         self.dataset_id_factory = dataset_id_factory
         self.exploration_event_id_factory = exploration_event_id_factory
         self.exploration_approval_id_factory = exploration_approval_id_factory
         self.training_gate_audit_id_factory = training_gate_audit_id_factory
+        self.run_id_factory = run_id_factory or (lambda: f"run-{uuid.uuid4()}")
+        self.run_event_id_factory = run_event_id_factory
+        self.training_instance_id_factory = training_instance_id_factory
+        self.training_executor_factory = training_executor_factory
         self.clock = clock
         self.memory_repository = MemoryRepository(
             id_factory=id_factory,
@@ -361,6 +378,200 @@ class DomainCore:
                 ) from audit_error
             raise
 
+    def execute_exploration(
+        self,
+        command: ExecuteExplorationCommand,
+    ) -> RunStatusSnapshot:
+        authorization = self.authorize_training(
+            AuthorizeTrainingCommand(
+                connection_path=command.connection_path,
+                code_root=command.code_root,
+                entry_point="execute_exploration",
+                dataset_id=command.dataset_id,
+                dataset_version=command.dataset_version,
+                plan_id=command.plan_id,
+                approval_id=command.approval_id,
+            )
+        )
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        dataset = self._require_confirmed_from_repository(
+            repository.repository_path,
+            command.dataset_id,
+            command.dataset_version,
+        )
+        exploration = self._exploration_repository(repository.repository_path)
+        plan, approval = exploration.require_current_approval(
+            command.plan_id,
+            command.approval_id,
+            command.code_root,
+        )
+        self._require_approved_dataset_binding(dataset, plan, approval)
+        if (
+            authorization.plan_event_id != plan.asset_id
+            or authorization.approval_id != approval.asset_id
+            or authorization.plan_fingerprint != plan.plan_fingerprint
+            or authorization.code_fingerprint != plan.code_fingerprint
+        ):
+            raise WorkspaceError(
+                code="authorization_changed",
+                message="Exploration authorization changed before Run creation.",
+                next_action="Review and authorize the current plan again.",
+            )
+        entrypoint = self._select_training_entrypoint(
+            plan,
+            command.entrypoint_path,
+        )
+        approved_rounds = {round_plan.round_number for round_plan in plan.rounds}
+        if (
+            len(set(command.human_marked_rounds))
+            != len(command.human_marked_rounds)
+            or any(
+                round_number not in approved_rounds
+                for round_number in command.human_marked_rounds
+            )
+        ):
+            raise WorkspaceError(
+                code="invalid_human_model_mark",
+                message="Human model marks must reference approved exploration rounds once.",
+                next_action="Choose round numbers from the approved plan.",
+            )
+        run_repository = self._run_repository(repository.repository_path)
+        executor = (
+            self.training_executor_factory()
+            if self.training_executor_factory is not None
+            else SubprocessTrainingExecutor()
+        )
+        return TrainingRunCoordinator(
+            run_repository,
+            executor,
+            repository.capacity,
+            connection.actor_id,
+        ).execute_new(
+            run_id=self.run_id_factory(),
+            plan=plan,
+            approval=approval,
+            dataset=dataset,
+            code_root=command.code_root,
+            entrypoint_path=entrypoint,
+            human_marked_rounds=command.human_marked_rounds,
+        )
+
+    def get_run_status(
+        self,
+        connection_path: Path,
+        run_id: str,
+    ) -> RunStatusSnapshot:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._run_repository(repository.repository_path).status(run_id)
+
+    def list_run_statuses(
+        self,
+        connection_path: Path,
+    ) -> tuple[RunStatusSnapshot, ...]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._run_repository(repository.repository_path).list_statuses()
+
+    def request_run_stop(
+        self,
+        command: RequestRunStopCommand,
+    ) -> RunStatusSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        runs = self._run_repository(repository.repository_path)
+        runs.request_stop(
+            command.run_id,
+            reason=command.reason,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        return runs.status(command.run_id)
+
+    def recover_run(
+        self,
+        command: RecoverRunCommand,
+    ) -> RunStatusSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        runs = self._run_repository(repository.repository_path)
+        if command.action == "close":
+            runs.recover_run(
+                command.run_id,
+                action="close",
+                actor_id=connection.actor_id,
+                capacity=repository.capacity,
+            )
+            return runs.status(command.run_id)
+        binding = runs.load_run_start(command.run_id)
+        exploration = self._exploration_repository(repository.repository_path)
+        plan = exploration.load_plan_event(
+            binding["plan_id"],
+            binding["plan_event_id"],
+        )
+        approval = exploration.load_approval(
+            binding["plan_id"],
+            binding["approval_id"],
+        )
+        dataset = self._require_confirmed_from_repository(
+            repository.repository_path,
+            binding["dataset_id"],
+            binding["dataset_version"],
+        )
+        self._require_approved_dataset_binding(dataset, plan, approval)
+        if (
+            binding["dataset_content_fingerprint"]
+            != dataset.content_fingerprint
+            or binding["dataset_version_fingerprint"]
+            != dataset.version_fingerprint
+            or binding["plan_fingerprint"] != plan.plan_fingerprint
+            or binding["approval_fingerprint"]
+            != approval.approval_fingerprint
+            or binding["code_fingerprint"] != plan.code_fingerprint
+        ):
+            raise WorkspaceError(
+                code="run_recovery_binding_mismatch",
+                message="Run recovery binding no longer matches its frozen approved evidence.",
+                next_action="Restore the Run evidence from Git or close it as interrupted.",
+            )
+        code_revision = runs.load_code_revision(
+            command.run_id,
+            binding["code_fingerprint"],
+        )
+        executor = (
+            self.training_executor_factory()
+            if self.training_executor_factory is not None
+            else SubprocessTrainingExecutor()
+        )
+        return TrainingRunCoordinator(
+            runs,
+            executor,
+            repository.capacity,
+            connection.actor_id,
+        ).resume_existing(
+            run_id=command.run_id,
+            plan=plan,
+            dataset=dataset,
+            code_revision=code_revision,
+            human_marked_rounds=tuple(binding["human_marked_rounds"]),
+        )
+
     def _exploration_repository(self, repository_path: Path) -> ExplorationRepository:
         return ExplorationRepository(
             repository_path,
@@ -369,6 +580,33 @@ class DomainCore:
             audit_id_factory=self.training_gate_audit_id_factory,
             clock=self.clock,
         )
+
+    def _run_repository(self, repository_path: Path) -> RunRepository:
+        return RunRepository(
+            repository_path,
+            event_id_factory=self.run_event_id_factory,
+            instance_id_factory=self.training_instance_id_factory,
+            clock=self.clock,
+        )
+
+    @staticmethod
+    def _select_training_entrypoint(
+        plan: ExplorationPlanSnapshot,
+        requested: str | None,
+    ) -> str:
+        python_files = tuple(
+            item.path
+            for item in plan.candidate_code_files
+            if item.path.endswith(".py")
+        )
+        selected = requested or (python_files[0] if python_files else None)
+        if selected is None or selected not in python_files:
+            raise WorkspaceError(
+                code="invalid_training_entrypoint",
+                message="Training entrypoint is not an approved Python code file.",
+                next_action="Choose an approved .py file that defines build_estimator(context).",
+            )
+        return selected
 
     @staticmethod
     def _require_managed_code_root(

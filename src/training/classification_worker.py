@@ -214,6 +214,9 @@ def evaluate(
         "task_type": data.task_type,
         "class_labels": list(data.class_labels),
         "positive_class": data.positive_class,
+        "hypothesis": payload["hypothesis"],
+        "optimization_direction": payload["optimization_direction"],
+        "intended_changes": list(payload["intended_changes"]),
         "configuration": payload["configuration"],
     }
     estimator = load_estimator(entrypoint, context, code_root=code_root)
