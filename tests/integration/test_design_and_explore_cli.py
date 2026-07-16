@@ -139,6 +139,10 @@ def test_design_and_explore_skill_preserves_human_gate_and_sop_boundary():
     assert "read-only" in skill.lower()
     assert "never auto-approve" in skill.lower()
     assert "not an sop" in skill.lower()
+    assert "build_estimator(context" in skill
+    assert "sklearn-compatible estimator" in skill
+    assert "must not replace" in skill
+    assert "formal models" in skill.lower()
 
 
 def plan_payload():

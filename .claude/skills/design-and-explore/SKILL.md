@@ -53,7 +53,19 @@ the opportunity to inspect both plan and code in the read-only Run Status view.
 ```
 
 5. Generate UTF-8 candidate training code under the selected managed code root. Use relative paths
-   in the plan and do not read or write through symlinks.
+   in the plan and do not read or write through symlinks. Select one approved Python entrypoint that
+   exposes exactly this execution seam:
+
+```python
+def build_estimator(context: dict):
+    """Return an unfitted sklearn-compatible estimator."""
+```
+
+The context provides the confirmed task type, class labels, positive class, random seed, round
+number, hypothesis, optimization direction, intended changes, and frozen configuration. Candidate
+code may compose preprocessing and model selection inside the estimator. It must not replace the
+worker's Dataset Version loading, frozen split, evaluation metrics, prediction evidence, or model
+serialization.
 6. Record the review candidate:
 
 ```bash
@@ -85,8 +97,10 @@ python -m src.agent.main explore \
   --dataset-version <integer-version> \
   --plan-id <plan-id> \
   --approval-id <approval-id> \
-  --code-root <managed-code-root>
+  --code-root <managed-code-root> \
+  --entrypoint <approved-python-entrypoint>
 ```
 
 If the plan or code changes, record the current content again and obtain a new explicit approval.
-Do not reuse an older approval and do not describe ordinary planning events as strategy versions.
+Do not reuse an older approval and do not describe ordinary planning events, Runs, Training
+Instances, or retained Run models as SOPs, SOP Versions, Formal Models, or strategy versions.

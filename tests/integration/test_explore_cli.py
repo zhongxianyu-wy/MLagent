@@ -2,6 +2,14 @@ from src.agent.main import main
 from src.domain.models import WorkspaceError
 
 
+class FakeRunStatus:
+    def __init__(self, state="completed"):
+        self.state = state
+
+    def to_dict(self):
+        return {"run_id": "run-1", "state": self.state, "rounds": []}
+
+
 def test_explore_cli_passes_approved_binding_to_issue_five_seam(
     confirmed_domain_core,
 ):
@@ -164,3 +172,70 @@ def test_explore_cli_returns_structured_error_for_missing_dataset_version_value(
     assert exit_code == 2
     assert requests == []
     assert "invalid_arguments" in capsys.readouterr().out
+
+
+def test_authoritative_explore_executes_domain_run_by_default(
+    confirmed_domain_core,
+    capsys,
+):
+    commands = []
+    confirmed_domain_core.execute_exploration = (
+        lambda command: commands.append(command) or FakeRunStatus()
+    )
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            "ds-1",
+            "--dataset-version",
+            "1",
+            "--plan-id",
+            "plan-1",
+            "--approval-id",
+            "approval-1",
+            "--code-root",
+            "/workspace/code",
+            "--entrypoint",
+            "estimator.py",
+        ],
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    assert exit_code == 0
+    assert len(commands) == 1
+    assert commands[0].dataset_id == "ds-1"
+    assert commands[0].dataset_version == 1
+    assert commands[0].plan_id == "plan-1"
+    assert commands[0].approval_id == "approval-1"
+    assert commands[0].entrypoint_path == "estimator.py"
+    assert '"state": "completed"' in capsys.readouterr().out
+
+
+def test_authoritative_explore_returns_nonzero_for_failed_terminal_run(
+    confirmed_domain_core,
+    capsys,
+):
+    confirmed_domain_core.execute_exploration = (
+        lambda command: FakeRunStatus("failed")
+    )
+
+    exit_code = main(
+        [
+            "explore",
+            "--dataset-id",
+            "ds-1",
+            "--dataset-version",
+            "1",
+            "--plan-id",
+            "plan-1",
+            "--approval-id",
+            "approval-1",
+            "--code-root",
+            "/workspace/code",
+        ],
+        domain_core_factory=lambda: confirmed_domain_core,
+    )
+
+    assert exit_code == 2
+    assert '"state": "failed"' in capsys.readouterr().out

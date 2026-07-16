@@ -114,14 +114,50 @@ def main(
             return explore_factory(request)
 
         if authoritative_reference is not None:
-            _print_workspace_error(
-                code="training_execution_not_implemented",
-                message="The approved exploration reached the Issue #5 execution seam.",
-                next_action=(
-                    "Implement the governed Run and Training Instance executor in Issue #5."
-                ),
+            from src.domain.models import ExecuteExplorationCommand, WorkspaceError
+
+            try:
+                status = authoritative_core.execute_exploration(
+                    ExecuteExplorationCommand(
+                        connection_path=Path(
+                            _option(
+                                args,
+                                "--workspace-config",
+                                ".mlagent-workspace.json",
+                            )
+                        ),
+                        code_root=Path(_option(args, "--code-root", ".")),
+                        dataset_id=dataset_id,
+                        dataset_version=authoritative_reference.snapshot.version,
+                        plan_id=authorization.plan_id,
+                        approval_id=authorization.approval_id,
+                        entrypoint_path=_option(args, "--entrypoint", None),
+                    )
+                )
+            except WorkspaceError as error:
+                print(
+                    json.dumps(
+                        {"status": "Failed", "error": error.to_dict()},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            except (TypeError, ValueError) as error:
+                _print_workspace_error(
+                    code="invalid_arguments",
+                    message=str(error),
+                    next_action="Check governed exploration arguments and retry.",
+                )
+                return 2
+            print(
+                json.dumps(
+                    status.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
             )
-            return 2
+            return 0 if status.state == "completed" else 2
 
         from src.agent.harness import ExplorationHarness
         from src.frontend_api.run_service import RunService
