@@ -16,7 +16,12 @@ from src.domain.models import (
     WorkspaceSnapshot,
 )
 from src.ui.app import _module_anchor
-from src.ui.shell import GLOBAL_STATUS_VOCABULARY, NAVIGATION, build_shell_state
+from src.ui.shell import (
+    GLOBAL_STATUS_VOCABULARY,
+    NAVIGATION,
+    build_shell_state,
+    sync_detail,
+)
 
 
 def workspace_snapshot() -> WorkspaceSnapshot:
@@ -223,6 +228,21 @@ def test_shell_exposes_capacity_warning_for_top_metric():
     shell = build_shell_state(snapshot)
 
     assert shell.git_detail == "Capacity warning"
+
+
+def test_live_sync_detail_changes_with_the_latest_projection():
+    pending = replace(
+        workspace_snapshot().sync,
+        state="pending_sync",
+        ahead_count=1,
+        changed_managed_paths=("experiences/new.json",),
+        message="Local changes are waiting.",
+        next_action="Retry synchronization.",
+    )
+
+    assert sync_detail(pending, "ok") == (
+        "main · 1 ahead · 0 behind · 1 managed changes"
+    )
 
 
 def test_shell_uses_confirmed_dataset_version_in_context_and_module_status():

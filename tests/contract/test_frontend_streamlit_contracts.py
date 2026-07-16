@@ -30,3 +30,4 @@ def test_git_status_uses_two_second_domain_projection_fragment():
 
     assert "@st.fragment(run_every=2.0)\ndef _render_live_sync_status" in source
     assert "core.get_sync_status" in source
+    assert "sync_detail(status" in source

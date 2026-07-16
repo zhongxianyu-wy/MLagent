@@ -140,14 +140,11 @@ class DomainCore:
         connection, repository = self._open_connected_repository(
             command.connection_path
         )
-        capacity = self.memory_repository.capacity_status(
-            repository.repository_path
-        )
         return GitSyncService(
             repository.repository_path,
             connection.actor_id,
             clock=self.clock,
-        ).session_stop(command.session_id, capacity)
+        ).session_stop(command.session_id)
 
     def get_sync_status(
         self,

@@ -1,3 +1,4 @@
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -185,6 +186,40 @@ def test_corrupt_local_state_fails_closed_without_changing_git(sync_workspace):
     assert git(sync_workspace.root, "rev-parse", "HEAD").stdout.strip() == before
 
 
+def test_stale_syncing_state_recovers_to_pending_when_lock_is_free(
+    sync_workspace,
+):
+    head = git(sync_workspace.root, "rev-parse", "HEAD").stdout.strip()
+    state_path = sync_workspace.root / ".mlagent-local/sync-state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "state": "syncing",
+                "branch": sync_workspace.branch,
+                "local_head": head,
+                "remote_head": head,
+                "ahead_count": 0,
+                "behind_count": 0,
+                "changed_managed_paths": [],
+                "conflict_paths": [],
+                "last_attempt_at": "2026-07-16T00:00:00Z",
+                "last_success_at": None,
+                "sync_commit": None,
+                "message": "Team Memory synchronization is running.",
+                "next_action": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status = sync_workspace.service().status()
+
+    assert status.state == "pending_sync"
+    assert "interrupted" in status.message.lower()
+
+
 def test_session_start_pushes_initial_branch_without_reclone(
     empty_remote_workspace,
 ):
@@ -259,6 +294,69 @@ def test_session_start_merges_disjoint_divergence(two_clients):
         "HEAD",
     ).stdout.split()
     assert len(parents) == 3
+
+
+def test_session_start_fast_forwards_with_unrelated_dirty_file(two_clients):
+    remote_head = write_and_commit(
+        two_clients.bob,
+        "raw-records/bob-event.json",
+        '{"asset_type":"run_event","asset_id":"bob-event"}\n',
+        "bob",
+    )
+    git(two_clients.bob, "push")
+    note = two_clients.alice / "notes.txt"
+    note.write_text("local note\n", encoding="utf-8")
+
+    status = two_clients.alice_service.session_start()
+
+    assert status.state == "synced"
+    assert status.local_head == remote_head
+    assert note.read_text(encoding="utf-8") == "local note\n"
+
+
+def test_session_start_preserves_dirty_path_touched_by_remote(two_clients):
+    relative = "experiences/shared.json"
+    write_and_commit(
+        two_clients.bob,
+        relative,
+        '{"actor":"bob"}\n',
+        "bob",
+    )
+    git(two_clients.bob, "push")
+    local = two_clients.alice / relative
+    local.write_text('{"actor":"alice"}\n', encoding="utf-8")
+
+    status = two_clients.alice_service.session_start()
+
+    assert status.state == "pending_sync"
+    assert local.read_text(encoding="utf-8") == '{"actor":"alice"}\n'
+
+
+def test_status_reports_both_paths_for_managed_rename(sync_workspace):
+    original = sync_workspace.root / "experiences/original.json"
+    original.write_text("{}\n", encoding="utf-8")
+    git(sync_workspace.root, "add", "--", "experiences/original.json")
+    git(
+        sync_workspace.root,
+        "-c",
+        "user.name=alice",
+        "-c",
+        "user.email=mlagent@local",
+        "commit",
+        "-m",
+        "test: add original",
+    )
+    git(sync_workspace.root, "push")
+    renamed = sync_workspace.root / "experiences/renamed.json"
+    original.rename(renamed)
+    git(sync_workspace.root, "add", "-A", "--", "experiences")
+
+    status = sync_workspace.service().status()
+
+    assert status.changed_managed_paths == (
+        "experiences/original.json",
+        "experiences/renamed.json",
+    )
 
 
 def test_session_stop_commits_only_managed_differences(two_clients):
@@ -451,6 +549,7 @@ def test_session_stop_rejects_file_at_capacity_limit_before_commit(tmp_path):
     manager.bootstrap(root, actor_id="alice", remote_url=str(remote))
     branch = git(root, "branch", "--show-current").stdout.strip()
     git(root, "push", "--set-upstream", "origin", f"HEAD:{branch}")
+    stale_capacity = manager.capacity_status(root)
     oversized = root / "models/too-large.bin"
     oversized.write_bytes(b"x" * 512)
     before = git(root, "rev-parse", "HEAD").stdout.strip()
@@ -459,7 +558,7 @@ def test_session_stop_rejects_file_at_capacity_limit_before_commit(tmp_path):
         root,
         "alice",
         clock=lambda: "2026-07-16T00:00:00Z",
-    ).session_stop("session-large", manager.capacity_status(root))
+    ).session_stop("session-large", stale_capacity)
 
     assert status.state == "pending_sync"
     assert "single-file" in status.message

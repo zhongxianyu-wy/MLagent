@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from src.domain.memory_repository import MANAGED_PATHS
+from src.domain.memory_repository import MANAGED_PATHS, MemoryRepository
 from src.domain.models import CapacityStatus, SyncStatusSnapshot, WorkspaceError
 
 
@@ -69,7 +69,33 @@ class GitSyncService:
                     "Retry SessionStart synchronization to rebuild local sync state."
                 ),
             )
-        if persisted is not None and persisted.state in {"syncing", "conflict"}:
+        if (
+            persisted is not None
+            and persisted.state == "syncing"
+            and self._sync_is_active()
+        ):
+            return persisted
+        if persisted is not None and persisted.state == "syncing":
+            branch = self._current_branch()
+            local_head = self._rev_parse("HEAD")
+            remote_head = self._optional_rev_parse(self._remote_ref(branch))
+            ahead, behind = self._ahead_behind(local_head, remote_head)
+            return self._snapshot(
+                state="pending_sync",
+                branch=branch,
+                local_head=local_head,
+                remote_head=remote_head,
+                ahead_count=ahead,
+                behind_count=behind,
+                changed_managed_paths=self._managed_changes(),
+                conflict_paths=(),
+                last_attempt_at=persisted.last_attempt_at,
+                last_success_at=persisted.last_success_at,
+                sync_commit=persisted.sync_commit,
+                message="The previous Team Memory synchronization was interrupted.",
+                next_action="Retry SessionStart synchronization.",
+            )
+        if persisted is not None and persisted.state == "conflict":
             return persisted
 
         branch = self._current_branch()
@@ -162,11 +188,14 @@ class GitSyncService:
     def session_stop(
         self,
         session_id: str,
-        capacity: CapacityStatus,
+        capacity: CapacityStatus | None = None,
     ) -> SyncStatusSnapshot:
         bounded_session_id = self._bounded_session_id(session_id)
         with self._sync_lock():
             self._validate_repository()
+            capacity = MemoryRepository().capacity_status(
+                self.repository_path
+            )
             previous, _ = self._load_local_state()
             attempt = self._timestamp()
             self._persist(
@@ -264,7 +293,7 @@ class GitSyncService:
 
         local_head = self._rev_parse("HEAD")
         ahead, behind = self._ahead_behind(local_head, remote_head)
-        dirty = self._worktree_changes()
+        dirty_paths = set(self._worktree_changes())
         if ahead == 0 and behind == 0:
             if self._managed_changes():
                 return self._finish_pending(
@@ -284,19 +313,21 @@ class GitSyncService:
                     next_action="Check remote write access and retry SessionStart.",
                 )
             return self._finish_synced(attempt, previous)
-        if dirty:
-            return self._finish_pending(
-                attempt=attempt,
-                previous=previous,
-                message=(
-                    "Remote Team Memory changes cannot be integrated into a "
-                    "dirty worktree."
-                ),
-                next_action=(
-                    "Finish or review local changes, then retry SessionStart."
-                ),
-            )
         if ahead == 0 and behind > 0:
+            remote_paths = set(self._diff_paths("HEAD", remote_ref))
+            if dirty_paths & remote_paths:
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    message=(
+                        "Remote Team Memory changes would overwrite "
+                        "uncommitted local paths."
+                    ),
+                    next_action=(
+                        "Review the overlapping local paths, then retry "
+                        "SessionStart."
+                    ),
+                )
             merged = self._git(
                 "merge",
                 "--ff-only",
@@ -315,6 +346,18 @@ class GitSyncService:
         base = self._merge_base("HEAD", remote_ref)
         local_paths = set(self._diff_paths(base, "HEAD"))
         remote_paths = set(self._diff_paths(base, remote_ref))
+        if dirty_paths & remote_paths:
+            return self._finish_pending(
+                attempt=attempt,
+                previous=previous,
+                message=(
+                    "Remote Team Memory changes would overwrite uncommitted "
+                    "local paths."
+                ),
+                next_action=(
+                    "Review the overlapping local paths, then retry SessionStart."
+                ),
+            )
         conflict_paths = tuple(sorted(local_paths & remote_paths))
         if conflict_paths:
             return self._finish_conflict(
@@ -596,12 +639,14 @@ class GitSyncService:
     ) -> tuple[str, str] | None:
         if capacity.largest_file_bytes >= capacity.max_file_bytes:
             return (
-                "A managed asset is at or above the single-file capacity limit.",
+                "A managed asset is at or above the single-file capacity "
+                f"limit of {capacity.max_file_bytes} bytes.",
                 "Remove or replace the oversized file, then retry Stop synchronization.",
             )
         if capacity.bytes_used >= capacity.max_repository_bytes:
             return (
-                "Team Memory is at or above the repository capacity limit.",
+                "Team Memory is at or above the repository capacity limit "
+                f"of {capacity.max_repository_bytes} bytes.",
                 "Archive or remove approved assets before retrying synchronization.",
             )
         return None
@@ -797,6 +842,7 @@ class GitSyncService:
                 )
             status = record[:2]
             path = record[3:]
+            changed.add(Path(path).as_posix())
             if "R" in status or "C" in status:
                 if index >= len(records) or not records[index]:
                     raise WorkspaceError(
@@ -806,7 +852,7 @@ class GitSyncService:
                     )
                 path = records[index]
                 index += 1
-            changed.add(Path(path).as_posix())
+                changed.add(Path(path).as_posix())
         return tuple(sorted(changed))
 
     def _merge_base(self, left: str, right: str) -> str:
@@ -824,6 +870,7 @@ class GitSyncService:
         result = self._git(
             "diff",
             "--name-only",
+            "--no-renames",
             "-z",
             f"{base}..{reference}",
         )
@@ -1039,6 +1086,21 @@ class GitSyncService:
                 yield
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _sync_is_active(self) -> bool:
+        path = self.repository_path / SYNC_LOCK_PATH
+        self._require_local_path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+b") as handle:
+            try:
+                fcntl.flock(
+                    handle.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
 
     def _timestamp(self) -> str:
         value = self.clock()

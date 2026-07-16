@@ -25,7 +25,12 @@ from src.domain.models import (
     RunStatusSnapshot,
     WorkspaceError,
 )
-from src.ui.shell import CONTEXT_LABELS, build_shell_state, sync_display
+from src.ui.shell import (
+    CONTEXT_LABELS,
+    build_shell_state,
+    sync_detail,
+    sync_display,
+)
 
 
 def main() -> None:
@@ -83,6 +88,7 @@ def main() -> None:
                     connection_path,
                     value,
                     shell.git_detail,
+                    snapshot.capacity.state,
                 )
             else:
                 st.metric(CONTEXT_LABELS[key], value)
@@ -432,13 +438,16 @@ def _render_live_sync_status(
     core: DomainCore,
     connection_path: Path,
     initial_status: str,
-    detail: str,
+    initial_detail: str,
+    capacity_state: str,
 ) -> None:
     try:
         status = core.get_sync_status(connection_path)
         value = sync_display(status.state)
+        detail = sync_detail(status, capacity_state)
     except WorkspaceError:
         value = initial_status
+        detail = initial_detail
     st.metric(
         "Git",
         value,

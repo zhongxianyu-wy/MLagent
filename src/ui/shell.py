@@ -7,6 +7,7 @@ from src.domain.models import (
     DatasetVersionSnapshot,
     ExplorationReviewSnapshot,
     RunStatusSnapshot,
+    SyncStatusSnapshot,
     WorkspaceSnapshot,
 )
 
@@ -114,7 +115,7 @@ def build_shell_state(
             f"{_format_bytes(snapshot.capacity.bytes_used)} of "
             f"{_format_bytes(snapshot.capacity.max_repository_bytes)}"
         ),
-        git_detail=_git_detail(snapshot),
+        git_detail=sync_detail(snapshot.sync, snapshot.capacity.state),
         issues=tuple(issue.to_dict() for issue in snapshot.issues),
         dataset=dataset,
         inspection=inspection,
@@ -133,22 +134,25 @@ def sync_display(state: str) -> str:
     }.get(state, "Failed")
 
 
-def _git_detail(snapshot: WorkspaceSnapshot) -> str:
-    if snapshot.capacity.state == "warning":
+def sync_detail(
+    status: SyncStatusSnapshot,
+    capacity_state: str,
+) -> str:
+    if capacity_state == "warning":
         return "Capacity warning"
-    if snapshot.capacity.state == "blocked":
+    if capacity_state == "blocked":
         return "Capacity blocked"
-    if snapshot.sync.state == "not_configured":
+    if status.state == "not_configured":
         return "Origin not configured"
-    if snapshot.sync.state == "conflict":
-        path = snapshot.sync.conflict_paths[0]
-        suffix = "" if len(snapshot.sync.conflict_paths) == 1 else " + more"
+    if status.state == "conflict":
+        path = status.conflict_paths[0]
+        suffix = "" if len(status.conflict_paths) == 1 else " + more"
         return f"{path}{suffix}"
-    branch = snapshot.sync.branch or "No branch"
+    branch = status.branch or "No branch"
     return (
-        f"{branch} · {snapshot.sync.ahead_count} ahead · "
-        f"{snapshot.sync.behind_count} behind · "
-        f"{len(snapshot.sync.changed_managed_paths)} managed changes"
+        f"{branch} · {status.ahead_count} ahead · "
+        f"{status.behind_count} behind · "
+        f"{len(status.changed_managed_paths)} managed changes"
     )
 
 
