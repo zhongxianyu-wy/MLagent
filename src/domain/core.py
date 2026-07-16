@@ -31,6 +31,7 @@ from src.domain.models import (
     RecoverRunCommand,
     RequestRunStopCommand,
     RunStatusSnapshot,
+    SyncStatusSnapshot,
     TrainingAuthorization,
     WorkspaceConnection,
     WorkspaceError,
@@ -686,6 +687,29 @@ class DomainCore:
             git_state=repository.git_state,
             remote=repository.remote,
             capacity=repository.capacity,
+            sync=SyncStatusSnapshot(
+                state=(
+                    "not_configured"
+                    if repository.remote.state == "not_configured"
+                    else "pending_sync"
+                ),
+                branch=None,
+                local_head=None,
+                remote_head=None,
+                ahead_count=0,
+                behind_count=0,
+                changed_managed_paths=(),
+                conflict_paths=(),
+                last_attempt_at=None,
+                last_success_at=None,
+                sync_commit=None,
+                message=repository.remote.message,
+                next_action=(
+                    "Configure the Team Memory origin."
+                    if repository.remote.state == "not_configured"
+                    else "Run SessionStart synchronization."
+                ),
+            ),
             ready=repository.ready,
             issues=repository.issues,
         )

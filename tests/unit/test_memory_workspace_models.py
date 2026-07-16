@@ -3,6 +3,7 @@ from pathlib import Path
 from src.domain.models import (
     CapacityStatus,
     RemoteStatus,
+    SyncStatusSnapshot,
     WorkspaceError,
     WorkspaceSnapshot,
 )
@@ -30,6 +31,21 @@ def test_workspace_snapshot_serializes_nested_statuses():
             max_file_bytes=100_000_000,
             max_repository_bytes=20_000_000_000,
         ),
+        sync=SyncStatusSnapshot(
+            state="not_configured",
+            branch="main",
+            local_head="local-sha",
+            remote_head=None,
+            ahead_count=0,
+            behind_count=0,
+            changed_managed_paths=(),
+            conflict_paths=(),
+            last_attempt_at=None,
+            last_success_at=None,
+            sync_commit=None,
+            message="No origin remote configured.",
+            next_action="Configure the Team Memory origin.",
+        ),
         ready=True,
         issues=(),
     )
@@ -40,6 +56,7 @@ def test_workspace_snapshot_serializes_nested_statuses():
     assert payload["managed_paths"] == ["datasets", "runs"]
     assert payload["remote"]["state"] == "not_configured"
     assert payload["capacity"]["bytes_used"] == 120
+    assert payload["sync"]["state"] == "not_configured"
 
 
 def test_workspace_error_exposes_stable_actionable_payload():

@@ -333,6 +333,15 @@ class RequestRunStopCommand:
 
 
 @dataclass(frozen=True)
+class SessionStopSyncCommand:
+    connection_path: Path
+    session_id: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.session_id, "session_id")
+
+
+@dataclass(frozen=True)
 class RecoverRunCommand:
     connection_path: Path
     run_id: str
@@ -618,6 +627,38 @@ class RunStatusSnapshot:
 
 
 @dataclass(frozen=True)
+class SyncStatusSnapshot:
+    state: str
+    branch: str | None
+    local_head: str | None
+    remote_head: str | None
+    ahead_count: int
+    behind_count: int
+    changed_managed_paths: tuple[str, ...]
+    conflict_paths: tuple[str, ...]
+    last_attempt_at: str | None
+    last_success_at: str | None
+    sync_commit: str | None
+    message: str
+    next_action: str | None
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _SYNC_STATES, "state")
+        _validate_non_negative(self.ahead_count, "ahead_count")
+        _validate_non_negative(self.behind_count, "behind_count")
+        _validate_non_empty(self.message, "message")
+        if self.state == "conflict":
+            if not self.conflict_paths:
+                raise ValueError("conflict requires conflict_paths")
+            _validate_non_empty(self.next_action, "next_action")
+        elif self.conflict_paths:
+            raise ValueError("conflict_paths require conflict state")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     repository_id: str
     schema_version: int
@@ -629,6 +670,7 @@ class WorkspaceSnapshot:
     git_state: str
     remote: RemoteStatus
     capacity: CapacityStatus
+    sync: SyncStatusSnapshot
     ready: bool
     issues: tuple[WorkspaceIssue, ...]
 
@@ -666,6 +708,15 @@ _RUN_STATES = frozenset(
     }
 )
 _RUN_RECOVERY_ACTIONS = frozenset({"resume", "close"})
+_SYNC_STATES = frozenset(
+    {
+        "not_configured",
+        "synced",
+        "syncing",
+        "pending_sync",
+        "conflict",
+    }
+)
 _COMPLETED_INSTANCE_EVIDENCE_FIELDS = (
     "dataset_content_fingerprint",
     "dataset_version_fingerprint",
