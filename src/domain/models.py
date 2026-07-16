@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
@@ -380,6 +382,11 @@ class TrainingExecutionResult:
                 raise ValueError("completed result requires model_path")
             if self.model_fingerprint is None:
                 raise ValueError("completed result requires model_fingerprint")
+            _validate_primary_metric(
+                self.primary_metric_name,
+                self.primary_metric_value,
+                self.metrics,
+            )
         else:
             if self.primary_metric_value is not None:
                 raise ValueError(
@@ -401,6 +408,11 @@ class TrainingExecutionResult:
                 )
             if self.metrics:
                 raise ValueError("non-completed result requires metrics to be empty")
+        object.__setattr__(
+            self,
+            "metrics",
+            MappingProxyType(dict(self.metrics)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -468,6 +480,11 @@ class TrainingInstanceSnapshot:
             if self.error_summary is not None:
                 raise ValueError("completed instance requires no error_summary")
             _validate_completed_instance_evidence(self)
+            _validate_primary_metric(
+                self.primary_metric_name,
+                self.primary_metric_value,
+                self.metrics,
+            )
         else:
             if self.reproducible_evidence:
                 raise ValueError(
@@ -479,6 +496,11 @@ class TrainingInstanceSnapshot:
                 )
             _validate_non_empty(self.error_code, "error_code")
             _validate_non_empty(self.error_summary, "error_summary")
+        object.__setattr__(
+            self,
+            "metrics",
+            MappingProxyType(dict(self.metrics)),
+        )
         object.__setattr__(
             self,
             "sop_source_eligible",
@@ -678,9 +700,23 @@ def _validate_optional_metric(value: float | None, field_name: str) -> None:
         _validate_metric(value, field_name)
 
 
-def _validate_metrics(metrics: dict[str, float]) -> None:
+def _validate_metrics(metrics: Mapping[str, float]) -> None:
     for name, value in metrics.items():
         _validate_metric(value, f"metrics.{name}")
+
+
+def _validate_primary_metric(
+    primary_metric_name: str,
+    primary_metric_value: float,
+    metrics: Mapping[str, float],
+) -> None:
+    _validate_non_empty(primary_metric_name, "primary_metric_name")
+    if primary_metric_name not in metrics:
+        raise ValueError("metrics must contain primary_metric_name")
+    if float(metrics[primary_metric_name]) != float(primary_metric_value):
+        raise ValueError(
+            "metrics primary value must equal primary_metric_value"
+        )
 
 
 def _validate_non_empty(value: str | None, field_name: str) -> None:
@@ -743,6 +779,6 @@ def _to_jsonable(value: Any) -> Any:
         return str(value)
     if isinstance(value, (list, tuple)):
         return [_to_jsonable(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: _to_jsonable(item) for key, item in value.items()}
     return value

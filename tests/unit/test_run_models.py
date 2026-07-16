@@ -166,6 +166,32 @@ def test_training_execution_result_is_terminal_json_safe_and_governed():
         )
 
 
+@pytest.mark.parametrize("factory_name", ("execution_result", "instance_snapshot"))
+def test_completed_training_evidence_requires_matching_primary_metric(factory_name):
+    factory = globals()[factory_name]
+    with pytest.raises(ValueError, match="primary_metric_name"):
+        factory(metrics={"accuracy": 0.8})
+    with pytest.raises(ValueError, match="primary_metric_value"):
+        factory(metrics={"roc_auc": 0.81})
+
+
+@pytest.mark.parametrize("factory_name", ("execution_result", "instance_snapshot"))
+def test_training_metrics_are_defensively_immutable(factory_name):
+    factory = globals()[factory_name]
+    metrics = {"roc_auc": 0.82, "accuracy": 0.8}
+    snapshot = factory(metrics=metrics)
+
+    metrics["roc_auc"] = 0.1
+
+    assert snapshot.metrics["roc_auc"] == 0.82
+    assert snapshot.to_dict()["metrics"] == {
+        "roc_auc": 0.82,
+        "accuracy": 0.8,
+    }
+    with pytest.raises(TypeError):
+        snapshot.metrics["roc_auc"] = 0.1
+
+
 @pytest.mark.parametrize("state", ("failed", "timed_out", "stopped"))
 @pytest.mark.parametrize("field_name", ("error_code", "error_summary"))
 def test_non_completed_execution_result_requires_error_details(state, field_name):
