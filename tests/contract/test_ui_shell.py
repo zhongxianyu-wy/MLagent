@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from src.domain.models import (
@@ -151,7 +152,7 @@ def test_shell_has_exactly_six_primary_modules_and_context_fields():
         "workspace": "tmr-1",
         "dataset": "Not started",
         "run": "Not started",
-        "git": "Success",
+        "git": "Synced",
         "writer": "alice",
     }
     assert shell.module_status["Dataset Overview"] == "Not started"
@@ -183,9 +184,45 @@ def test_shell_exposes_the_approved_global_status_vocabulary():
         "Pending review",
         "Approved",
         "Rejected",
-        "Pending sync",
+        "Synced",
+        "Syncing",
+        "Pending Sync",
         "Conflict",
     )
+
+
+def test_shell_maps_sync_projection_to_approved_git_status():
+    snapshot = replace(
+        workspace_snapshot(),
+        sync=replace(
+            workspace_snapshot().sync,
+            state="pending_sync",
+            message="Local changes are waiting.",
+            next_action="Retry synchronization.",
+        ),
+    )
+
+    shell = build_shell_state(snapshot)
+
+    assert shell.context["git"] == "Pending Sync"
+    assert (
+        shell.git_detail
+        == "main · 0 ahead · 0 behind · 0 managed changes"
+    )
+
+
+def test_shell_exposes_capacity_warning_for_top_metric():
+    snapshot = replace(
+        workspace_snapshot(),
+        capacity=replace(
+            workspace_snapshot().capacity,
+            state="warning",
+        ),
+    )
+
+    shell = build_shell_state(snapshot)
+
+    assert shell.git_detail == "Capacity warning"
 
 
 def test_shell_uses_confirmed_dataset_version_in_context_and_module_status():

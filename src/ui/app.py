@@ -25,7 +25,7 @@ from src.domain.models import (
     RunStatusSnapshot,
     WorkspaceError,
 )
-from src.ui.shell import CONTEXT_LABELS, build_shell_state
+from src.ui.shell import CONTEXT_LABELS, build_shell_state, sync_display
 
 
 def main() -> None:
@@ -77,7 +77,15 @@ def main() -> None:
     context_columns = st.columns(5)
     for column, (key, value) in zip(context_columns, shell.context.items()):
         with column:
-            st.metric(CONTEXT_LABELS[key], value)
+            if key == "git":
+                _render_live_sync_status(
+                    core,
+                    connection_path,
+                    value,
+                    shell.git_detail,
+                )
+            else:
+                st.metric(CONTEXT_LABELS[key], value)
 
     st.divider()
     st.subheader(selected_module, anchor=_module_anchor(selected_module))
@@ -417,6 +425,26 @@ def _render_run_status(
                     f"Authorized for Issue #5 execution: "
                     f"{authorization.approval_id}"
                 )
+
+
+@st.fragment(run_every=2.0)
+def _render_live_sync_status(
+    core: DomainCore,
+    connection_path: Path,
+    initial_status: str,
+    detail: str,
+) -> None:
+    try:
+        status = core.get_sync_status(connection_path)
+        value = sync_display(status.state)
+    except WorkspaceError:
+        value = initial_status
+    st.metric(
+        "Git",
+        value,
+        delta=detail,
+        delta_color="off",
+    )
 
 
 @st.fragment(run_every=2.0)

@@ -28,7 +28,9 @@ GLOBAL_STATUS_VOCABULARY = (
     "Pending review",
     "Approved",
     "Rejected",
-    "Pending sync",
+    "Synced",
+    "Syncing",
+    "Pending Sync",
     "Conflict",
 )
 CONTEXT_LABELS = {
@@ -48,6 +50,7 @@ class ShellState:
     schema_version: int
     indexed_assets: int
     capacity_text: str
+    git_detail: str
     issues: tuple[dict[str, str], ...]
     dataset: DatasetVersionSnapshot | None
     inspection: DatasetInspection | None
@@ -62,12 +65,7 @@ def build_shell_state(
     exploration_review: ExplorationReviewSnapshot | None = None,
     run_statuses: tuple[RunStatusSnapshot, ...] = (),
 ) -> ShellState:
-    git_status = {
-        "reachable": "Success",
-        "not_configured": "Pending confirmation",
-        "unreachable": "Failed",
-        "invalid": "Failed",
-    }.get(snapshot.remote.state, "Failed")
+    git_status = sync_display(snapshot.sync.state)
     module_status = {module: "Not started" for module in NAVIGATION}
     if dataset is not None:
         module_status["Dataset Overview"] = "Success"
@@ -116,11 +114,41 @@ def build_shell_state(
             f"{_format_bytes(snapshot.capacity.bytes_used)} of "
             f"{_format_bytes(snapshot.capacity.max_repository_bytes)}"
         ),
+        git_detail=_git_detail(snapshot),
         issues=tuple(issue.to_dict() for issue in snapshot.issues),
         dataset=dataset,
         inspection=inspection,
         exploration_review=exploration_review,
         run_statuses=run_statuses,
+    )
+
+
+def sync_display(state: str) -> str:
+    return {
+        "not_configured": "Pending confirmation",
+        "synced": "Synced",
+        "syncing": "Syncing",
+        "pending_sync": "Pending Sync",
+        "conflict": "Conflict",
+    }.get(state, "Failed")
+
+
+def _git_detail(snapshot: WorkspaceSnapshot) -> str:
+    if snapshot.capacity.state == "warning":
+        return "Capacity warning"
+    if snapshot.capacity.state == "blocked":
+        return "Capacity blocked"
+    if snapshot.sync.state == "not_configured":
+        return "Origin not configured"
+    if snapshot.sync.state == "conflict":
+        path = snapshot.sync.conflict_paths[0]
+        suffix = "" if len(snapshot.sync.conflict_paths) == 1 else " + more"
+        return f"{path}{suffix}"
+    branch = snapshot.sync.branch or "No branch"
+    return (
+        f"{branch} · {snapshot.sync.ahead_count} ahead · "
+        f"{snapshot.sync.behind_count} behind · "
+        f"{len(snapshot.sync.changed_managed_paths)} managed changes"
     )
 
 
