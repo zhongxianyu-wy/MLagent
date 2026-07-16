@@ -14,3 +14,12 @@ def test_service_contracts_include_streamlit_readiness_review():
     assert "direct Python service calls" in contracts
     assert "HTTP/SSE" in contracts
     assert "must not call AIDE, MLflow, ChromaDB, or local file adapters directly" in contracts
+
+
+def test_run_status_uses_two_second_domain_projection_fragment():
+    source = Path("src/ui/app.py").read_text(encoding="utf-8")
+
+    assert "@st.fragment(run_every=2.0)" in source
+    assert "core.get_run_status" in source
+    assert "core.request_run_stop" in source
+    assert "st.line_chart" in source

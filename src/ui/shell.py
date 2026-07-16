@@ -6,6 +6,7 @@ from src.domain.models import (
     DatasetInspection,
     DatasetVersionSnapshot,
     ExplorationReviewSnapshot,
+    RunStatusSnapshot,
     WorkspaceSnapshot,
 )
 
@@ -51,6 +52,7 @@ class ShellState:
     dataset: DatasetVersionSnapshot | None
     inspection: DatasetInspection | None
     exploration_review: ExplorationReviewSnapshot | None
+    run_statuses: tuple[RunStatusSnapshot, ...]
 
 
 def build_shell_state(
@@ -58,6 +60,7 @@ def build_shell_state(
     dataset: DatasetVersionSnapshot | None = None,
     inspection: DatasetInspection | None = None,
     exploration_review: ExplorationReviewSnapshot | None = None,
+    run_statuses: tuple[RunStatusSnapshot, ...] = (),
 ) -> ShellState:
     git_status = {
         "reachable": "Success",
@@ -77,6 +80,17 @@ def build_shell_state(
             "approved": "Approved",
             "approval_stale": "Failed",
         }.get(exploration_review.approval_state, "Failed")
+        module_status["Run Status"] = run_status
+    if run_statuses:
+        latest_run = run_statuses[0]
+        run_status = {
+            "running": "Running",
+            "completed": "Success",
+            "failed": "Failed",
+            "timed_out": "Failed",
+            "stopped": "Failed",
+            "recovery_required": "Pending confirmation",
+        }.get(latest_run.state, "Failed")
         module_status["Run Status"] = run_status
     return ShellState(
         navigation=NAVIGATION,
@@ -106,6 +120,7 @@ def build_shell_state(
         dataset=dataset,
         inspection=inspection,
         exploration_review=exploration_review,
+        run_statuses=run_statuses,
     )
 
 

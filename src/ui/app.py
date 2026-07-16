@@ -20,6 +20,9 @@ from src.domain.models import (
     DatasetVersionSnapshot,
     ExplorationReviewSnapshot,
     InspectDatasetCommand,
+    RecoverRunCommand,
+    RequestRunStopCommand,
+    RunStatusSnapshot,
     WorkspaceError,
 )
 from src.ui.shell import CONTEXT_LABELS, build_shell_state
@@ -45,6 +48,7 @@ def main() -> None:
             connection_path,
             code_root,
         )
+        run_statuses = core.list_run_statuses(connection_path)
     except WorkspaceError as error:
         st.error(error.message)
         st.caption(error.next_action)
@@ -56,6 +60,7 @@ def main() -> None:
         dataset,
         inspection,
         exploration_review,
+        run_statuses,
     )
     with st.sidebar:
         st.title("MLagent")
@@ -86,6 +91,7 @@ def main() -> None:
             connection_path,
             code_root,
             shell.exploration_review,
+            shell.run_statuses,
         )
 
     for issue in shell.issues:
@@ -239,9 +245,27 @@ def _render_run_status(
     connection_path: Path,
     code_root: Path,
     review: ExplorationReviewSnapshot | None,
+    run_statuses: tuple[RunStatusSnapshot, ...],
 ) -> None:
+    if run_statuses:
+        run_ids = tuple(status.run_id for status in run_statuses)
+        labels = {
+            status.run_id: (
+                f"{status.run_id} · {_state_label(status.state)} · "
+                f"{status.updated_at}"
+            )
+            for status in run_statuses
+        }
+        selected_run = st.selectbox(
+            "Run",
+            run_ids,
+            format_func=lambda run_id: labels[run_id],
+        )
+        _render_live_run(core, connection_path, selected_run)
+        st.divider()
     if review is None:
-        st.info("No exploration plan recorded")
+        if not run_statuses:
+            st.info("No exploration plan recorded")
         return
 
     plan = review.plan
@@ -393,6 +417,152 @@ def _render_run_status(
                     f"Authorized for Issue #5 execution: "
                     f"{authorization.approval_id}"
                 )
+
+
+@st.fragment(run_every=2.0)
+def _render_live_run(
+    core: DomainCore,
+    connection_path: Path,
+    run_id: str,
+) -> None:
+    try:
+        status = core.get_run_status(connection_path, run_id)
+    except WorkspaceError as error:
+        st.error(f"{error.code}: {error.message}")
+        st.caption(error.next_action)
+        return
+    summary_columns = st.columns(5)
+    summary = (
+        ("Run state", _state_label(status.state)),
+        ("Round", f"{status.current_round} / {len(status.rounds)}"),
+        ("Elapsed", _format_duration(status.elapsed_ms)),
+        (
+            "Best",
+            (
+                "Not available"
+                if status.best_primary_metric_value is None
+                else f"{status.best_primary_metric_value:g}"
+            ),
+        ),
+        ("Target", f"{status.target_metric_value:g}"),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.caption(
+        f"{status.primary_metric_name} · updated {status.updated_at} · "
+        f"{status.user_direction}"
+    )
+
+    if status.performance_points:
+        trend = pd.DataFrame(
+            [
+                {
+                    "Round": point.round_number,
+                    status.primary_metric_name: point.primary_metric_value,
+                    "Target": status.target_metric_value,
+                }
+                for point in status.performance_points
+            ]
+        )
+        st.line_chart(
+            trend,
+            x="Round",
+            y=[status.primary_metric_name, "Target"],
+        )
+    else:
+        st.info("No completed performance point")
+
+    round_rows = [
+        {
+            "Round": round_status.round_number,
+            "Instance": round_status.instance_id,
+            "Direction": round_status.optimization_direction,
+            "Parent": round_status.parent_instance_id or "None",
+            "State": _state_label(round_status.instance_state),
+            "Duration": _format_duration(round_status.duration_ms),
+            "Metric": round_status.primary_metric_value,
+            "Model retention": (
+                ", ".join(round_status.model_retention_reasons) or "None"
+            ),
+            "Error": round_status.error_code or "None",
+        }
+        for round_status in status.rounds
+    ]
+    if round_rows:
+        st.dataframe(
+            pd.DataFrame(round_rows),
+            hide_index=True,
+            width="stretch",
+        )
+
+    action_columns = st.columns(3)
+    with action_columns[0]:
+        if st.button(
+            "Stop Run",
+            key=f"stop_run_{run_id}",
+            type="primary",
+            disabled=(status.state != "running" or status.stop_requested),
+        ):
+            try:
+                core.request_run_stop(
+                    RequestRunStopCommand(
+                        connection_path=connection_path,
+                        run_id=run_id,
+                    )
+                )
+            except WorkspaceError as error:
+                st.error(f"{error.code}: {error.message}")
+                st.caption(error.next_action)
+            else:
+                st.rerun()
+    with action_columns[1]:
+        if st.button(
+            "Resume Run",
+            key=f"resume_run_{run_id}",
+            disabled=status.state != "recovery_required",
+        ):
+            _recover_run(core, connection_path, run_id, "resume")
+    with action_columns[2]:
+        if st.button(
+            "Close Run",
+            key=f"close_run_{run_id}",
+            disabled=status.state != "recovery_required",
+        ):
+            _recover_run(core, connection_path, run_id, "close")
+
+
+def _recover_run(
+    core: DomainCore,
+    connection_path: Path,
+    run_id: str,
+    action: str,
+) -> None:
+    try:
+        core.recover_run(
+            RecoverRunCommand(
+                connection_path=connection_path,
+                run_id=run_id,
+                action=action,
+            )
+        )
+    except WorkspaceError as error:
+        st.error(f"{error.code}: {error.message}")
+        st.caption(error.next_action)
+    else:
+        st.rerun()
+
+
+def _state_label(state: str) -> str:
+    return state.replace("_", " ").capitalize()
+
+
+def _format_duration(duration_ms: int) -> str:
+    seconds = duration_ms / 1000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining = divmod(round(seconds), 60)
+    return f"{minutes}m {remaining}s"
 
 
 def _render_reference_group(label: str, references: tuple[str, ...]) -> None:

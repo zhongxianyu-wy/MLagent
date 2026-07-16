@@ -9,9 +9,11 @@ from src.domain.models import (
     ApproveExplorationPlanCommand,
     BootstrapMemoryCommand,
     ConfirmDatasetCommand,
+    ExecuteExplorationCommand,
     ExplorationRound,
     RecordExplorationPlanCommand,
 )
+from src.domain.run_repository import RunRepository, RunStartSpec
 
 
 @pytest.fixture
@@ -24,7 +26,7 @@ def run_status_workspace(tmp_path, monkeypatch):
         clock=lambda: "2026-07-15T00:00:00Z",
     )
     connection_path = tmp_path / ".mlagent-workspace.json"
-    core.bootstrap_memory(
+    snapshot = core.bootstrap_memory(
         BootstrapMemoryCommand(
             repository_path=tmp_path / "team-memory",
             actor_id="alice",
@@ -48,7 +50,20 @@ def run_status_workspace(tmp_path, monkeypatch):
     )
     code_root = tmp_path / "code"
     code_root.mkdir()
-    training_code = "print('reviewed baseline')\n"
+    training_code = (
+        "from sklearn.dummy import DummyClassifier\n"
+        "from sklearn.linear_model import LogisticRegression\n"
+        "from sklearn.pipeline import Pipeline\n"
+        "from sklearn.preprocessing import StandardScaler\n\n"
+        "def build_estimator(context):\n"
+        "    if context['round_number'] == 1:\n"
+        "        return DummyClassifier(strategy='prior')\n"
+        "    return Pipeline([\n"
+        "        ('scale', StandardScaler()),\n"
+        "        ('model', LogisticRegression(\n"
+        "            random_state=context['random_seed'], max_iter=500)),\n"
+        "    ])\n"
+    )
     (code_root / "train.py").write_text(training_code, encoding="utf-8")
     core.record_exploration_plan(
         RecordExplorationPlanCommand(
@@ -93,15 +108,27 @@ def run_status_workspace(tmp_path, monkeypatch):
         connection_path=connection_path,
         code_root=code_root,
         training_code=training_code,
+        memory_root=tmp_path / "team-memory",
+        capacity=snapshot.capacity,
     )
 
 
 class RunStatusWorkspace:
-    def __init__(self, core, connection_path, code_root, training_code):
+    def __init__(
+        self,
+        core,
+        connection_path,
+        code_root,
+        training_code,
+        memory_root,
+        capacity,
+    ):
         self.core = core
         self.connection_path = connection_path
         self.code_root = code_root
         self.training_code = training_code
+        self.memory_root = memory_root
+        self.capacity = capacity
 
     def load_app(self):
         app = AppTest.from_file(
@@ -118,6 +145,54 @@ class RunStatusWorkspace:
                 plan_id="plan-1",
             )
         )
+
+    def seed_completed_run(self):
+        approval = self.approve()
+        return self.core.execute_exploration(
+            ExecuteExplorationCommand(
+                connection_path=self.connection_path,
+                code_root=self.code_root,
+                dataset_id="ds-1",
+                dataset_version=1,
+                plan_id="plan-1",
+                approval_id=approval.asset_id,
+                entrypoint_path="train.py",
+            )
+        )
+
+    def seed_running_run(self):
+        review = self.core.get_exploration_review(
+            self.connection_path,
+            self.code_root,
+            "plan-1",
+        )
+        approval = self.approve()
+        plan = review.plan
+        runs = RunRepository(self.memory_root)
+        runs.start_run(
+            RunStartSpec(
+                run_id="run-live",
+                dataset_id=plan.dataset_id,
+                dataset_version=plan.dataset_version,
+                dataset_content_fingerprint=plan.dataset_content_fingerprint,
+                dataset_version_fingerprint=plan.dataset_version_fingerprint,
+                plan_id=plan.plan_id,
+                plan_event_id=plan.asset_id,
+                plan_fingerprint=plan.plan_fingerprint,
+                approval_id=approval.asset_id,
+                approval_fingerprint=approval.approval_fingerprint,
+                code_fingerprint=plan.code_fingerprint,
+                user_direction=plan.user_direction,
+                stop_conditions=plan.stop_conditions,
+                primary_metric_name=plan.primary_metric,
+                target_metric_value=plan.target_metric,
+                expected_round_count=len(plan.rounds),
+            ),
+            actor_id="alice",
+            capacity=self.capacity,
+        )
+        runs.activate_run("run-live")
+        return runs
 
 
 def test_run_status_renders_plan_confidence_code_and_approval(
@@ -186,6 +261,44 @@ def test_run_status_readiness_check_cannot_bypass_approval(run_status_workspace)
     assert any(
         "plan_approval_required" in error.value for error in app.error
     )
+
+
+def test_run_status_renders_live_curve_rounds_target_and_retention(
+    run_status_workspace,
+):
+    status = run_status_workspace.seed_completed_run()
+
+    app = run_status_workspace.load_app()
+
+    assert not app.exception
+    metrics = {(metric.label, metric.value) for metric in app.metric}
+    assert ("Run state", "Completed") in metrics
+    assert ("Best", f"{status.best_primary_metric_value:g}") in metrics
+    assert ("Target", "0.91") in metrics
+    assert app.get("arrow_vega_lite_chart") or app.get("vega_lite_chart")
+    tables = [element.value for element in app.dataframe]
+    assert any("feature_selection" in table.to_string() for table in tables)
+    assert any("stage_best" in table.to_string() for table in tables)
+    assert find_button(app, "Stop Run").disabled is True
+
+
+def test_active_run_stop_button_records_domain_stop_request(run_status_workspace):
+    runs = run_status_workspace.seed_running_run()
+    try:
+        app = run_status_workspace.load_app()
+        stop = find_button(app, "Stop Run")
+        assert stop.disabled is False
+
+        app = stop.click().run()
+
+        assert not app.exception
+        status = run_status_workspace.core.get_run_status(
+            run_status_workspace.connection_path,
+            "run-live",
+        )
+        assert status.stop_requested is True
+    finally:
+        runs.deactivate_run("run-live")
 
 
 def find_button(app, label):
