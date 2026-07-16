@@ -37,7 +37,7 @@ def main() -> None:
     st.set_page_config(
         page_title="MLagent",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
     _apply_styles()
 

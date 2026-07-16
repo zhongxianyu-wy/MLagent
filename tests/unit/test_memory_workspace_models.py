@@ -5,6 +5,7 @@ from src.domain.models import (
     RemoteStatus,
     SyncStatusSnapshot,
     WorkspaceError,
+    WorkspaceIssue,
     WorkspaceSnapshot,
 )
 
@@ -72,3 +73,17 @@ def test_workspace_error_exposes_stable_actionable_payload():
         "next_action": "Use a repository with schema version 1.",
     }
     assert str(error) == "Schema version 2 is not supported."
+
+
+def test_workspace_issue_exposes_stable_actionable_payload():
+    issue = WorkspaceIssue(
+        code="repository_capacity_warning",
+        message="Team Memory is approaching its capacity limit.",
+        next_action="Archive approved assets before the hard limit.",
+    )
+
+    assert issue.to_dict() == {
+        "code": "repository_capacity_warning",
+        "message": "Team Memory is approaching its capacity limit.",
+        "next_action": "Archive approved assets before the hard limit.",
+    }

@@ -31,3 +31,9 @@ def test_git_status_uses_two_second_domain_projection_fragment():
     assert "@st.fragment(run_every=2.0)\ndef _render_live_sync_status" in source
     assert "core.get_sync_status" in source
     assert "sync_detail(status" in source
+
+
+def test_workspace_sidebar_uses_responsive_initial_state():
+    source = Path("src/ui/app.py").read_text(encoding="utf-8")
+
+    assert 'initial_sidebar_state="auto"' in source

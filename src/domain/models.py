@@ -14,6 +14,9 @@ class WorkspaceIssue:
     message: str
     next_action: str
 
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
 
 @dataclass(frozen=True)
 class RemoteStatus:
