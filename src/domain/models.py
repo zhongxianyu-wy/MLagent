@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+import math
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -310,6 +311,245 @@ class TrainingAuthorization:
 
 
 @dataclass(frozen=True)
+class ExecuteExplorationCommand:
+    connection_path: Path
+    code_root: Path
+    dataset_id: str
+    dataset_version: int
+    plan_id: str
+    approval_id: str
+    entrypoint_path: str | None = None
+    human_marked_rounds: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestRunStopCommand:
+    connection_path: Path
+    run_id: str
+    reason: str = "user_stop"
+
+
+@dataclass(frozen=True)
+class RecoverRunCommand:
+    connection_path: Path
+    run_id: str
+    action: str
+
+    def __post_init__(self) -> None:
+        if self.action not in _RUN_RECOVERY_ACTIONS:
+            raise ValueError(
+                f"action must be one of {sorted(_RUN_RECOVERY_ACTIONS)}"
+            )
+
+
+@dataclass(frozen=True)
+class TrainingExecutionResult:
+    state: str
+    primary_metric_name: str
+    primary_metric_value: float | None
+    metrics: dict[str, float]
+    predictions_path: Path | None
+    model_path: Path | None
+    model_fingerprint: str | None
+    error_code: str | None
+    error_summary: str | None
+    started_at: str
+    ended_at: str
+    duration_ms: int
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _TERMINAL_TRAINING_STATES, "state")
+        _validate_optional_metric(
+            self.primary_metric_value,
+            "primary_metric_value",
+        )
+        _validate_metrics(self.metrics)
+        _validate_non_negative(self.duration_ms, "duration_ms")
+        if self.state == "completed":
+            if self.primary_metric_value is None:
+                raise ValueError(
+                    "completed result requires primary_metric_value"
+                )
+            if self.error_code is not None:
+                raise ValueError("completed result requires no error_code")
+            if self.predictions_path is None:
+                raise ValueError("completed result requires predictions_path")
+            if self.model_path is None:
+                raise ValueError("completed result requires model_path")
+            if self.model_fingerprint is None:
+                raise ValueError("completed result requires model_fingerprint")
+        elif self.primary_metric_value is not None:
+            raise ValueError(
+                "non-completed result requires primary_metric_value to be None"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class TrainingInstanceSnapshot:
+    asset_id: str
+    asset_path: str
+    run_id: str
+    round_number: int
+    state: str
+    reproducible_evidence: bool
+    dataset_version_fingerprint: str
+    code_fingerprint: str
+    configuration_fingerprint: str
+    environment_fingerprint: str
+    split_fingerprint: str
+    random_seed: int
+    parent_instance_id: str | None
+    optimization_direction: str
+    primary_metric_name: str
+    primary_metric_value: float | None
+    metrics: dict[str, float]
+    model_fingerprint: str | None
+    model_retention_reasons: tuple[str, ...]
+    model_path: str | None
+    error_code: str | None
+    error_summary: str | None
+    started_at: str
+    ended_at: str
+    duration_ms: int
+    sop_source_eligible: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _TERMINAL_TRAINING_STATES, "state")
+        _validate_positive(self.round_number, "round_number")
+        _validate_optional_metric(
+            self.primary_metric_value,
+            "primary_metric_value",
+        )
+        _validate_metrics(self.metrics)
+        _validate_non_negative(self.duration_ms, "duration_ms")
+        if self.state == "completed":
+            if not self.reproducible_evidence:
+                raise ValueError(
+                    "completed instance requires reproducible_evidence true"
+                )
+            if self.primary_metric_value is None:
+                raise ValueError(
+                    "completed instance requires primary_metric_value"
+                )
+            if self.error_code is not None:
+                raise ValueError("completed instance requires no error_code")
+        else:
+            if self.reproducible_evidence:
+                raise ValueError(
+                    "non-completed instance requires reproducible_evidence false"
+                )
+            if self.primary_metric_value is not None:
+                raise ValueError(
+                    "non-completed instance requires primary_metric_value to be None"
+                )
+        object.__setattr__(
+            self,
+            "sop_source_eligible",
+            self.state == "completed" and self.reproducible_evidence,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class RunPerformancePoint:
+    round_number: int
+    instance_id: str
+    primary_metric_value: float
+
+    def __post_init__(self) -> None:
+        _validate_positive(self.round_number, "round_number")
+        _validate_metric(self.primary_metric_value, "primary_metric_value")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class RunRoundSnapshot:
+    round_number: int
+    instance_id: str
+    hypothesis: str
+    optimization_direction: str
+    parent_instance_id: str | None
+    instance_state: str
+    duration_ms: int
+    primary_metric_value: float | None
+    model_retention_reasons: tuple[str, ...]
+    error_code: str | None
+    error_summary: str | None
+
+    def __post_init__(self) -> None:
+        _validate_positive(self.round_number, "round_number")
+        _validate_state(
+            self.instance_state,
+            _TERMINAL_TRAINING_STATES,
+            "instance_state",
+        )
+        _validate_non_negative(self.duration_ms, "duration_ms")
+        _validate_optional_metric(
+            self.primary_metric_value,
+            "primary_metric_value",
+        )
+        if (
+            self.instance_state != "completed"
+            and self.primary_metric_value is not None
+        ):
+            raise ValueError(
+                "non-completed round requires primary_metric_value to be None"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class RunStatusSnapshot:
+    run_id: str
+    plan_id: str
+    approval_id: str
+    dataset_id: str
+    dataset_version: int
+    user_direction: str
+    stop_conditions: tuple[str, ...]
+    primary_metric_name: str
+    target_metric_value: float
+    state: str
+    current_round: int
+    rounds: tuple[RunRoundSnapshot, ...]
+    performance_points: tuple[RunPerformancePoint, ...]
+    best_instance_id: str | None
+    best_primary_metric_value: float | None
+    target_gap: float | None
+    started_at: str
+    ended_at: str | None
+    elapsed_ms: int
+    updated_at: str
+    stop_reason: str | None
+    stop_requested: bool
+    recovery_reason: str | None
+    recovery_actions: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _RUN_STATES, "state")
+        _validate_non_negative(self.current_round, "current_round")
+        _validate_metric(self.target_metric_value, "target_metric_value")
+        _validate_optional_metric(
+            self.best_primary_metric_value,
+            "best_primary_metric_value",
+        )
+        _validate_optional_metric(self.target_gap, "target_gap")
+        _validate_non_negative(self.elapsed_ms, "elapsed_ms")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
 class WorkspaceSnapshot:
     repository_id: str
     schema_version: int
@@ -341,6 +581,58 @@ class WorkspaceError(RuntimeError):
             "message": self.message,
             "next_action": self.next_action,
         }
+
+
+_TERMINAL_TRAINING_STATES = frozenset(
+    {"completed", "failed", "timed_out", "stopped"}
+)
+_RUN_STATES = frozenset(
+    {
+        "created",
+        "running",
+        "completed",
+        "failed",
+        "timed_out",
+        "stopped",
+        "recovery_required",
+    }
+)
+_RUN_RECOVERY_ACTIONS = frozenset({"resume", "close"})
+
+
+def _validate_state(value: str, allowed: frozenset[str], field_name: str) -> None:
+    if value not in allowed:
+        raise ValueError(f"{field_name} must be one of {sorted(allowed)}")
+
+
+def _validate_metric(value: float, field_name: str) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError(f"{field_name} must be a finite number in [0, 1]")
+
+
+def _validate_optional_metric(value: float | None, field_name: str) -> None:
+    if value is not None:
+        _validate_metric(value, field_name)
+
+
+def _validate_metrics(metrics: dict[str, float]) -> None:
+    for name, value in metrics.items():
+        _validate_metric(value, f"metrics.{name}")
+
+
+def _validate_non_negative(value: int, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
+
+
+def _validate_positive(value: int, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
 
 
 def _to_jsonable(value: Any) -> Any:
