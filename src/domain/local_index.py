@@ -115,11 +115,22 @@ class LocalIndex:
                 message="Committed Team Memory assets cannot be enumerated.",
                 next_action="Restore a valid Git HEAD before rebuilding the Local Index.",
             )
-        return sorted(
+        json_paths = (
             path.decode("utf-8")
             for path in result.stdout.split(b"\0")
             if path and path.endswith(b".json")
         )
+        return sorted(
+            path for path in json_paths if self._is_indexable_asset_path(path)
+        )
+
+    @staticmethod
+    def _is_indexable_asset_path(relative: str) -> bool:
+        if relative.startswith("runs/"):
+            return relative.endswith("/manifest.json")
+        if relative.startswith("datasets/"):
+            return relative.endswith("/manifest.json")
+        return True
 
     def _read_asset(self, relative: str) -> tuple[str, str, str, str, str | None, str | None, str | None]:
         raw = self._committed_bytes(relative)
