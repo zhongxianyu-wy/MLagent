@@ -241,6 +241,8 @@ def test_capacity_excludes_git_metadata_and_disposable_local_index(tmp_path):
     local_asset.write_bytes(b"x" * 20_000)
 
     reopened = policy_manager.open(repository_path, actor_id="alice")
+    refreshed = policy_manager.capacity_status(repository_path)
 
     assert reopened.capacity.bytes_used == created.capacity.bytes_used
     assert reopened.capacity.state == "ok"
+    assert refreshed == reopened.capacity

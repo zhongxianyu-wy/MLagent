@@ -157,6 +157,18 @@ class MemoryRepository:
         self._validate_actor(actor_id)
         return self._open(root, actor_id=actor_id, git_state="existing")
 
+    def capacity_status(self, repository_path: Path) -> CapacityStatus:
+        root = repository_path.expanduser().resolve()
+        if not root.is_dir() or not (root / ".git").is_dir():
+            raise WorkspaceError(
+                code="invalid_repository",
+                message=f"Team Memory Repository is not a Git worktree: {root}",
+                next_action="Restore the repository before checking capacity.",
+            )
+        manifest = self._load_manifest(root / MANIFEST_PATH)
+        self._validate_manifest(manifest)
+        return self._capacity_status(root, manifest["limits"])
+
     def _open(
         self,
         root: Path,

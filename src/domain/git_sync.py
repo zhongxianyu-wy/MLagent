@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from src.domain.memory_repository import MANAGED_PATHS
-from src.domain.models import SyncStatusSnapshot, WorkspaceError
+from src.domain.models import CapacityStatus, SyncStatusSnapshot, WorkspaceError
 
 
 SYNC_STATE_PATH = Path(".mlagent-local/sync-state.json")
@@ -159,6 +159,84 @@ class GitSyncService:
                 )
             return self._integrate_startup(attempt, previous)
 
+    def session_stop(
+        self,
+        session_id: str,
+        capacity: CapacityStatus,
+    ) -> SyncStatusSnapshot:
+        bounded_session_id = self._bounded_session_id(session_id)
+        with self._sync_lock():
+            self._validate_repository()
+            previous, _ = self._load_local_state()
+            attempt = self._timestamp()
+            self._persist(
+                self._current_snapshot(
+                    state="syncing",
+                    last_attempt_at=attempt,
+                    last_success_at=(
+                        None if previous is None else previous.last_success_at
+                    ),
+                    sync_commit=(
+                        None if previous is None else previous.sync_commit
+                    ),
+                    message="Team Memory synchronization is running.",
+                    next_action=None,
+                )
+            )
+            capacity_block = self._capacity_block(capacity)
+            if capacity_block is not None:
+                message, next_action = capacity_block
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    message=message,
+                    next_action=next_action,
+                )
+
+            staged_paths = self._stage_managed_paths()
+            sync_commit = (
+                self._commit_staged(bounded_session_id, staged_paths)
+                if staged_paths
+                else None
+            )
+            if self._origin_url() is None:
+                return self._finish_not_configured(
+                    attempt=attempt,
+                    previous=previous,
+                    sync_commit=sync_commit,
+                )
+
+            branch = self._current_branch()
+            pushed = self._git(
+                "push",
+                "origin",
+                f"HEAD:{branch}",
+                check=False,
+            )
+            if pushed.returncode == 0:
+                return self._finish_synced(
+                    attempt,
+                    previous,
+                    sync_commit=sync_commit,
+                )
+
+            fetched = self._git("fetch", "--prune", "origin", check=False)
+            if fetched.returncode != 0:
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    sync_commit=sync_commit,
+                    message="The Team Memory origin could not be fetched.",
+                    next_action=(
+                        "Check the remote path, SSH identity, and network, then retry."
+                    ),
+                )
+            return self._retry_rejected_push(
+                attempt=attempt,
+                previous=previous,
+                sync_commit=sync_commit,
+            )
+
     def _integrate_startup(
         self,
         attempt: str,
@@ -272,21 +350,187 @@ class GitSyncService:
             )
         return self._finish_synced(attempt, previous)
 
+    def _retry_rejected_push(
+        self,
+        *,
+        attempt: str,
+        previous: SyncStatusSnapshot | None,
+        sync_commit: str | None,
+    ) -> SyncStatusSnapshot:
+        branch = self._current_branch()
+        remote_ref = self._remote_ref(branch)
+        remote_head = self._optional_rev_parse(remote_ref)
+        if remote_head is None:
+            pushed = self._git(
+                "push",
+                "--set-upstream",
+                "origin",
+                f"HEAD:{branch}",
+                check=False,
+            )
+            if pushed.returncode != 0:
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    sync_commit=sync_commit,
+                    message="The Team Memory branch could not be pushed.",
+                    next_action="Check remote write access and retry SessionStart.",
+                )
+            return self._finish_synced(
+                attempt,
+                previous,
+                sync_commit=sync_commit,
+            )
+
+        local_head = self._rev_parse("HEAD")
+        ahead, behind = self._ahead_behind(local_head, remote_head)
+        if ahead == 0 and behind == 0:
+            return self._finish_synced(
+                attempt,
+                previous,
+                sync_commit=sync_commit,
+            )
+        if ahead > 0 and behind == 0:
+            pushed = self._git(
+                "push",
+                "origin",
+                f"HEAD:{branch}",
+                check=False,
+            )
+            if pushed.returncode != 0:
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    sync_commit=sync_commit,
+                    message="Local Team Memory commits could not be pushed.",
+                    next_action=(
+                        "Check remote write access and retry SessionStart."
+                    ),
+                )
+            return self._finish_synced(
+                attempt,
+                previous,
+                sync_commit=sync_commit,
+            )
+        if self._managed_changes():
+            return self._finish_pending(
+                attempt=attempt,
+                previous=previous,
+                sync_commit=sync_commit,
+                message=(
+                    "Remote Team Memory changes cannot be integrated while "
+                    "managed assets remain uncommitted."
+                ),
+                next_action="Review managed changes, then retry SessionStart.",
+            )
+        if ahead == 0 and behind > 0:
+            merged = self._git(
+                "merge",
+                "--ff-only",
+                remote_ref,
+                check=False,
+            )
+            if merged.returncode != 0:
+                return self._finish_pending(
+                    attempt=attempt,
+                    previous=previous,
+                    sync_commit=sync_commit,
+                    message="Remote Team Memory changes could not be fast-forwarded.",
+                    next_action="Inspect the branch history and retry.",
+                )
+            return self._finish_synced(
+                attempt,
+                previous,
+                sync_commit=sync_commit,
+            )
+
+        base = self._merge_base("HEAD", remote_ref)
+        local_paths = set(self._diff_paths(base, "HEAD"))
+        remote_paths = set(self._diff_paths(base, remote_ref))
+        conflict_paths = tuple(sorted(local_paths & remote_paths))
+        if conflict_paths:
+            return self._finish_conflict(
+                attempt=attempt,
+                previous=previous,
+                sync_commit=sync_commit,
+                conflict_paths=conflict_paths,
+            )
+        merged = self._git(
+            "-c",
+            f"user.name={self.actor_id}",
+            "-c",
+            "user.email=mlagent@local",
+            "merge",
+            "--no-edit",
+            remote_ref,
+            check=False,
+        )
+        if merged.returncode != 0:
+            unexpected = self._unmerged_paths()
+            self._abort_merge()
+            return self._finish_conflict(
+                attempt=attempt,
+                previous=previous,
+                sync_commit=sync_commit,
+                conflict_paths=unexpected or tuple(sorted(local_paths | remote_paths)),
+            )
+        pushed = self._git(
+            "push",
+            "origin",
+            f"HEAD:{branch}",
+            check=False,
+        )
+        if pushed.returncode != 0:
+            return self._finish_pending(
+                attempt=attempt,
+                previous=previous,
+                sync_commit=sync_commit,
+                message="Merged Team Memory commits could not be pushed.",
+                next_action="Retry SessionStart; the local merge commit is preserved.",
+            )
+        return self._finish_synced(
+            attempt,
+            previous,
+            sync_commit=sync_commit,
+        )
+
     def _finish_synced(
         self,
         attempt: str,
         previous: SyncStatusSnapshot | None,
+        *,
+        sync_commit: str | None = None,
     ) -> SyncStatusSnapshot:
         return self._persist(
             self._current_snapshot(
                 state="synced",
                 last_attempt_at=attempt,
                 last_success_at=attempt,
-                sync_commit=(
-                    None if previous is None else previous.sync_commit
-                ),
+                sync_commit=self._sync_commit(previous, sync_commit),
                 message="Team Memory is synchronized.",
                 next_action=None,
+            )
+        )
+
+    def _finish_not_configured(
+        self,
+        *,
+        attempt: str,
+        previous: SyncStatusSnapshot | None,
+        sync_commit: str | None = None,
+    ) -> SyncStatusSnapshot:
+        return self._persist(
+            self._current_snapshot(
+                state="not_configured",
+                last_attempt_at=attempt,
+                last_success_at=(
+                    None if previous is None else previous.last_success_at
+                ),
+                sync_commit=self._sync_commit(previous, sync_commit),
+                message="No origin remote is configured.",
+                next_action=(
+                    "Configure the Team Memory origin before synchronization."
+                ),
             )
         )
 
@@ -295,6 +539,7 @@ class GitSyncService:
         *,
         attempt: str,
         previous: SyncStatusSnapshot | None,
+        sync_commit: str | None = None,
         message: str,
         next_action: str,
     ) -> SyncStatusSnapshot:
@@ -305,9 +550,7 @@ class GitSyncService:
                 last_success_at=(
                     None if previous is None else previous.last_success_at
                 ),
-                sync_commit=(
-                    None if previous is None else previous.sync_commit
-                ),
+                sync_commit=self._sync_commit(previous, sync_commit),
                 message=message,
                 next_action=next_action,
             )
@@ -318,32 +561,128 @@ class GitSyncService:
         *,
         attempt: str,
         previous: SyncStatusSnapshot | None,
+        sync_commit: str | None = None,
         conflict_paths: tuple[str, ...],
     ) -> SyncStatusSnapshot:
-        current = self._current_snapshot(
-            state="conflict",
-            last_attempt_at=attempt,
-            last_success_at=(
-                None if previous is None else previous.last_success_at
-            ),
-            sync_commit=None if previous is None else previous.sync_commit,
-            message="The same Team Memory path changed on both branches.",
-            next_action=(
-                "Review both committed versions and resolve through the owning "
-                "Domain Core workflow."
-            ),
-        )
         return self._persist(
-            SyncStatusSnapshot(
-                **{
-                    **current.to_dict(),
-                    "changed_managed_paths": tuple(
-                        current.changed_managed_paths
-                    ),
-                    "conflict_paths": conflict_paths,
-                }
+            self._current_snapshot(
+                state="conflict",
+                last_attempt_at=attempt,
+                last_success_at=(
+                    None if previous is None else previous.last_success_at
+                ),
+                sync_commit=self._sync_commit(previous, sync_commit),
+                message="The same Team Memory path changed on both branches.",
+                next_action=(
+                    "Review both committed versions and resolve through the "
+                    "owning Domain Core workflow."
+                ),
+                conflict_paths=conflict_paths,
             )
         )
+
+    @staticmethod
+    def _sync_commit(
+        previous: SyncStatusSnapshot | None,
+        sync_commit: str | None,
+    ) -> str | None:
+        if sync_commit is not None:
+            return sync_commit
+        return None if previous is None else previous.sync_commit
+
+    @staticmethod
+    def _capacity_block(
+        capacity: CapacityStatus,
+    ) -> tuple[str, str] | None:
+        if capacity.largest_file_bytes >= capacity.max_file_bytes:
+            return (
+                "A managed asset is at or above the single-file capacity limit.",
+                "Remove or replace the oversized file, then retry Stop synchronization.",
+            )
+        if capacity.bytes_used >= capacity.max_repository_bytes:
+            return (
+                "Team Memory is at or above the repository capacity limit.",
+                "Archive or remove approved assets before retrying synchronization.",
+            )
+        return None
+
+    def _stage_managed_paths(self) -> tuple[str, ...]:
+        staged = self._git("add", "-A", "--", *MANAGED_PATHS, check=False)
+        if staged.returncode != 0:
+            raise WorkspaceError(
+                code="git_stage_failed",
+                message=(
+                    staged.stderr.strip()
+                    or "Managed Team Memory assets could not be staged."
+                ),
+                next_action="Inspect managed paths and retry Stop synchronization.",
+            )
+        difference = self._git(
+            "diff",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--",
+            *MANAGED_PATHS,
+            check=False,
+        )
+        if difference.returncode != 0:
+            raise WorkspaceError(
+                code="git_stage_inspection_failed",
+                message="Staged Team Memory differences could not be inspected.",
+                next_action="Inspect the Git index and retry Stop synchronization.",
+            )
+        return tuple(
+            sorted(path for path in difference.stdout.split("\0") if path)
+        )
+
+    def _commit_staged(
+        self,
+        session_id: str,
+        staged_paths: tuple[str, ...],
+    ) -> str:
+        committed = self._git(
+            "-c",
+            f"user.name={self.actor_id}",
+            "-c",
+            "user.email=mlagent@local",
+            "commit",
+            "--only",
+            "-m",
+            "chore(memory): sync managed assets",
+            "-m",
+            f"MLagent-Session: {session_id}",
+            "--",
+            *staged_paths,
+            check=False,
+        )
+        if committed.returncode != 0:
+            raise WorkspaceError(
+                code="git_commit_failed",
+                message=(
+                    committed.stderr.strip()
+                    or "Managed Team Memory assets could not be committed."
+                ),
+                next_action="Inspect the Git index and retry Stop synchronization.",
+            )
+        return self._rev_parse("HEAD")
+
+    @staticmethod
+    def _bounded_session_id(session_id: str) -> str:
+        if not isinstance(session_id, str):
+            raise WorkspaceError(
+                code="invalid_session_id",
+                message="Stop synchronization requires a session identity.",
+                next_action="Retry Stop with the Claude Code session ID.",
+            )
+        bounded = " ".join(session_id.split())[:200]
+        if not bounded:
+            raise WorkspaceError(
+                code="invalid_session_id",
+                message="Stop synchronization requires a session identity.",
+                next_action="Retry Stop with the Claude Code session ID.",
+            )
+        return bounded
 
     def _current_snapshot(
         self,
@@ -354,6 +693,7 @@ class GitSyncService:
         sync_commit: str | None,
         message: str,
         next_action: str | None,
+        conflict_paths: tuple[str, ...] = (),
     ) -> SyncStatusSnapshot:
         branch = self._current_branch()
         local_head = self._rev_parse("HEAD")
@@ -367,7 +707,7 @@ class GitSyncService:
             ahead_count=ahead,
             behind_count=behind,
             changed_managed_paths=self._managed_changes(),
-            conflict_paths=(),
+            conflict_paths=conflict_paths,
             last_attempt_at=last_attempt_at,
             last_success_at=last_success_at,
             sync_commit=sync_commit,
@@ -622,7 +962,20 @@ class GitSyncService:
                 check=False,
                 timeout=self.git_timeout_seconds,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired as error:
+            if not check:
+                return subprocess.CompletedProcess(
+                    args=["git", *arguments],
+                    returncode=124,
+                    stdout=_subprocess_text(error.stdout),
+                    stderr=_subprocess_text(error.stderr) or "Git command timed out.",
+                )
+            raise WorkspaceError(
+                code="git_timeout",
+                message="Git timed out during Team Memory synchronization.",
+                next_action="Check the remote connection and retry synchronization.",
+            ) from error
+        except OSError as error:
             raise WorkspaceError(
                 code="git_unavailable",
                 message="Git could not be started for Team Memory synchronization.",
@@ -712,3 +1065,11 @@ class GitSyncService:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value

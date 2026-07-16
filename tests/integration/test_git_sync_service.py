@@ -137,6 +137,10 @@ def write_and_commit(
     return git(root, "rev-parse", "HEAD").stdout.strip()
 
 
+def repository_capacity(root: Path):
+    return MemoryRepository().open(root, actor_id="test").capacity
+
+
 def test_missing_local_state_is_derived_without_network(sync_workspace):
     status = sync_workspace.service().status()
 
@@ -255,3 +259,276 @@ def test_session_start_merges_disjoint_divergence(two_clients):
         "HEAD",
     ).stdout.split()
     assert len(parents) == 3
+
+
+def test_session_stop_commits_only_managed_differences(two_clients):
+    managed = two_clients.alice / "experiences/candidate.json"
+    managed.write_text("{}\n", encoding="utf-8")
+    unrelated = two_clients.alice / "notes.txt"
+    unrelated.write_text("local only\n", encoding="utf-8")
+
+    status = two_clients.alice_service.session_stop(
+        "session-1",
+        repository_capacity(two_clients.alice),
+    )
+
+    assert status.state == "synced"
+    committed = git(
+        two_clients.alice,
+        "show",
+        "--name-only",
+        "--format=",
+        "HEAD",
+    ).stdout.splitlines()
+    assert "experiences/candidate.json" in committed
+    assert "notes.txt" not in committed
+    assert unrelated.is_file()
+    assert git(
+        two_clients.alice,
+        "status",
+        "--porcelain",
+        "--",
+        "notes.txt",
+    ).stdout.startswith("??")
+
+
+def test_session_stop_preserves_pre_staged_unmanaged_differences(two_clients):
+    unrelated = two_clients.alice / "notes.txt"
+    unrelated.write_text("review later\n", encoding="utf-8")
+    git(two_clients.alice, "add", "--", "notes.txt")
+    (two_clients.alice / "experiences/candidate.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    status = two_clients.alice_service.session_stop(
+        "session-staged-note",
+        repository_capacity(two_clients.alice),
+    )
+
+    assert status.state == "synced"
+    committed = git(
+        two_clients.alice,
+        "show",
+        "--name-only",
+        "--format=",
+        "HEAD",
+    ).stdout.splitlines()
+    assert "experiences/candidate.json" in committed
+    assert "notes.txt" not in committed
+    assert git(
+        two_clients.alice,
+        "status",
+        "--porcelain",
+        "--",
+        "notes.txt",
+    ).stdout.startswith("A ")
+
+
+def test_empty_session_stop_does_not_create_commit(two_clients):
+    before = git(two_clients.alice, "rev-parse", "HEAD").stdout.strip()
+
+    status = two_clients.alice_service.session_stop(
+        "session-empty",
+        repository_capacity(two_clients.alice),
+    )
+
+    assert status.state == "synced"
+    assert git(two_clients.alice, "rev-parse", "HEAD").stdout.strip() == before
+
+
+def test_rejected_push_fetches_merges_disjoint_and_retries_once(two_clients):
+    (two_clients.alice / "experiences/alice.json").write_text(
+        '{"actor":"alice"}\n',
+        encoding="utf-8",
+    )
+    write_and_commit(
+        two_clients.bob,
+        "raw-records/bob.json",
+        '{"actor":"bob"}\n',
+        "bob",
+    )
+    git(two_clients.bob, "push")
+
+    status = two_clients.alice_service.session_stop(
+        "session-retry",
+        repository_capacity(two_clients.alice),
+    )
+
+    assert status.state == "synced"
+    assert (
+        git(
+            two_clients.remote,
+            "show",
+            f"{two_clients.branch}:experiences/alice.json",
+        ).returncode
+        == 0
+    )
+    assert (
+        git(
+            two_clients.remote,
+            "show",
+            f"{two_clients.branch}:raw-records/bob.json",
+        ).returncode
+        == 0
+    )
+
+
+def test_same_path_divergence_preserves_local_commit_and_reports_conflict(
+    two_clients,
+):
+    relative = "experiences/shared.json"
+    write_and_commit(
+        two_clients.bob,
+        relative,
+        '{"actor":"bob"}\n',
+        "bob",
+    )
+    git(two_clients.bob, "push")
+    (two_clients.alice / relative).write_text(
+        '{"actor":"alice"}\n',
+        encoding="utf-8",
+    )
+
+    status = two_clients.alice_service.session_stop(
+        "session-conflict",
+        repository_capacity(two_clients.alice),
+    )
+
+    assert status.state == "conflict"
+    assert status.conflict_paths == (relative,)
+    assert (
+        (two_clients.alice / relative).read_text(encoding="utf-8")
+        == '{"actor":"alice"}\n'
+    )
+    local_head = git(two_clients.alice, "rev-parse", "HEAD").stdout.strip()
+    assert local_head != status.remote_head
+    assert status.sync_commit == local_head
+
+
+def test_unavailable_remote_preserves_commit_and_later_start_retries(
+    two_clients,
+):
+    asset = two_clients.alice / "experiences/pending.json"
+    asset.write_text("{}\n", encoding="utf-8")
+    disabled_remote = two_clients.remote.with_name("team-memory.disabled")
+    two_clients.remote.rename(disabled_remote)
+    try:
+        pending = two_clients.alice_service.session_stop(
+            "session-offline",
+            repository_capacity(two_clients.alice),
+        )
+    finally:
+        disabled_remote.rename(two_clients.remote)
+
+    assert pending.state == "pending_sync"
+    assert pending.sync_commit is not None
+    assert asset.is_file()
+
+    recovered = two_clients.alice_service.session_start()
+
+    assert recovered.state == "synced"
+    assert (
+        git(
+            two_clients.remote,
+            "show",
+            f"{two_clients.branch}:experiences/pending.json",
+        ).returncode
+        == 0
+    )
+
+
+def test_session_stop_rejects_file_at_capacity_limit_before_commit(tmp_path):
+    remote = tmp_path / "team-memory.git"
+    init_bare_remote(remote)
+    root = tmp_path / "alice"
+    manager = MemoryRepository(
+        id_factory=lambda: "tmr-1",
+        clock=lambda: "2026-07-16T00:00:00Z",
+        max_file_bytes=512,
+        max_repository_bytes=100_000,
+    )
+    manager.bootstrap(root, actor_id="alice", remote_url=str(remote))
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    git(root, "push", "--set-upstream", "origin", f"HEAD:{branch}")
+    oversized = root / "models/too-large.bin"
+    oversized.write_bytes(b"x" * 512)
+    before = git(root, "rev-parse", "HEAD").stdout.strip()
+
+    status = GitSyncService(
+        root,
+        "alice",
+        clock=lambda: "2026-07-16T00:00:00Z",
+    ).session_stop("session-large", manager.capacity_status(root))
+
+    assert status.state == "pending_sync"
+    assert "single-file" in status.message
+    assert git(root, "rev-parse", "HEAD").stdout.strip() == before
+    assert oversized.is_file()
+
+
+def test_session_stop_allows_repository_capacity_warning(tmp_path):
+    remote = tmp_path / "team-memory.git"
+    init_bare_remote(remote)
+    root = tmp_path / "alice"
+    max_repository_bytes = 10_000
+    manager = MemoryRepository(
+        id_factory=lambda: "tmr-1",
+        clock=lambda: "2026-07-16T00:00:00Z",
+        max_file_bytes=100_000,
+        max_repository_bytes=max_repository_bytes,
+        warning_ratio=0.8,
+    )
+    created = manager.bootstrap(
+        root,
+        actor_id="alice",
+        remote_url=str(remote),
+    )
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    git(root, "push", "--set-upstream", "origin", f"HEAD:{branch}")
+    warning_bytes = int(max_repository_bytes * 0.8)
+    padding_bytes = max(warning_bytes - created.capacity.bytes_used + 1, 1)
+    (root / "experiences/padding.bin").write_bytes(b"x" * padding_bytes)
+    capacity = manager.capacity_status(root)
+
+    status = GitSyncService(
+        root,
+        "alice",
+        clock=lambda: "2026-07-16T00:00:00Z",
+    ).session_stop("session-warning", capacity)
+
+    assert capacity.state == "warning"
+    assert status.state == "synced"
+
+
+def test_session_stop_never_invokes_force_git_arguments(
+    two_clients,
+    monkeypatch,
+):
+    (two_clients.alice / "experiences/candidate.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    capacity = repository_capacity(two_clients.alice)
+    real_run = subprocess.run
+    commands: list[tuple[str, ...]] = []
+
+    def recording_run(arguments, *args, **kwargs):
+        commands.append(tuple(str(argument) for argument in arguments))
+        return real_run(arguments, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+
+    status = two_clients.alice_service.session_stop(
+        "session-no-force",
+        capacity,
+    )
+
+    assert status.state == "synced"
+    assert commands
+    assert not any(
+        argument in {"--force", "--force-with-lease", "--force-if-includes"}
+        or (argument.startswith("+") and ":" in argument)
+        for command in commands
+        for argument in command
+    )
