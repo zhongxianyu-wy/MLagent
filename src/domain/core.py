@@ -11,6 +11,7 @@ from typing import Any
 from src.domain.dataset_intake import DatasetInspector
 from src.domain.dataset_repository import DatasetRepository
 from src.domain.exploration_repository import ExplorationRepository
+from src.domain.git_sync import GitSyncService
 from src.domain.local_index import LocalIndex
 from src.domain.memory_repository import MemoryRepository, RepositoryStatus
 from src.domain.models import (
@@ -31,6 +32,7 @@ from src.domain.models import (
     RecoverRunCommand,
     RequestRunStopCommand,
     RunStatusSnapshot,
+    SessionStopSyncCommand,
     SyncStatusSnapshot,
     TrainingAuthorization,
     WorkspaceConnection,
@@ -96,16 +98,67 @@ class DomainCore:
             ),
         )
         index = LocalIndex(repository.repository_path).rebuild()
-        return self._snapshot(repository, index)
+        sync = GitSyncService(
+            repository.repository_path,
+            repository.actor_id,
+            clock=self.clock,
+        ).status()
+        return self._snapshot(repository, index, sync)
 
     def open_workspace(self, connection_path: Path) -> WorkspaceSnapshot:
-        connection = self._load_connection(connection_path)
-        repository = self.memory_repository.open(
-            connection.repository_path,
-            actor_id=connection.actor_id,
+        connection, repository = self._open_connected_repository(
+            connection_path
         )
         index = LocalIndex(repository.repository_path).rebuild()
-        return self._snapshot(repository, index)
+        sync = GitSyncService(
+            repository.repository_path,
+            connection.actor_id,
+            clock=self.clock,
+        ).status()
+        return self._snapshot(repository, index, sync)
+
+    def sync_session_start(
+        self,
+        connection_path: Path,
+    ) -> SyncStatusSnapshot:
+        connection, repository = self._open_connected_repository(
+            connection_path
+        )
+        status = GitSyncService(
+            repository.repository_path,
+            connection.actor_id,
+            clock=self.clock,
+        ).session_start()
+        if status.state == "synced":
+            LocalIndex(repository.repository_path).rebuild()
+        return status
+
+    def sync_session_stop(
+        self,
+        command: SessionStopSyncCommand,
+    ) -> SyncStatusSnapshot:
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        capacity = self.memory_repository.capacity_status(
+            repository.repository_path
+        )
+        return GitSyncService(
+            repository.repository_path,
+            connection.actor_id,
+            clock=self.clock,
+        ).session_stop(command.session_id, capacity)
+
+    def get_sync_status(
+        self,
+        connection_path: Path,
+    ) -> SyncStatusSnapshot:
+        connection = self._load_connection(connection_path)
+        return GitSyncService(
+            connection.repository_path,
+            connection.actor_id,
+            clock=self.clock,
+        ).status()
 
     def rebuild_local_index(self, connection_path: Path) -> IndexSummary:
         connection = self._load_connection(connection_path)
@@ -675,6 +728,7 @@ class DomainCore:
     def _snapshot(
         repository: RepositoryStatus,
         index: IndexSummary,
+        sync: SyncStatusSnapshot,
     ) -> WorkspaceSnapshot:
         return WorkspaceSnapshot(
             repository_id=repository.repository_id,
@@ -687,32 +741,21 @@ class DomainCore:
             git_state=repository.git_state,
             remote=repository.remote,
             capacity=repository.capacity,
-            sync=SyncStatusSnapshot(
-                state=(
-                    "not_configured"
-                    if repository.remote.state == "not_configured"
-                    else "pending_sync"
-                ),
-                branch=None,
-                local_head=None,
-                remote_head=None,
-                ahead_count=0,
-                behind_count=0,
-                changed_managed_paths=(),
-                conflict_paths=(),
-                last_attempt_at=None,
-                last_success_at=None,
-                sync_commit=None,
-                message=repository.remote.message,
-                next_action=(
-                    "Configure the Team Memory origin."
-                    if repository.remote.state == "not_configured"
-                    else "Run SessionStart synchronization."
-                ),
-            ),
+            sync=sync,
             ready=repository.ready,
             issues=repository.issues,
         )
+
+    def _open_connected_repository(
+        self,
+        connection_path: Path,
+    ) -> tuple[WorkspaceConnection, RepositoryStatus]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return connection, repository
 
     @staticmethod
     def _validate_connection_location(

@@ -29,6 +29,7 @@ def test_domain_core_bootstrap_writes_local_connection_and_builds_index(tmp_path
         "repository_path": str(repository_path.resolve()),
     }
     assert "remote_url" not in connection_path.read_text()
+    assert snapshot.sync.state == "not_configured"
 
 
 def test_domain_core_reopens_connection_and_rebuilds_deleted_index(tmp_path):
