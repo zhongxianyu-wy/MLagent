@@ -372,16 +372,35 @@ class TrainingExecutionResult:
                 )
             if self.error_code is not None:
                 raise ValueError("completed result requires no error_code")
+            if self.error_summary is not None:
+                raise ValueError("completed result requires no error_summary")
             if self.predictions_path is None:
                 raise ValueError("completed result requires predictions_path")
             if self.model_path is None:
                 raise ValueError("completed result requires model_path")
             if self.model_fingerprint is None:
                 raise ValueError("completed result requires model_fingerprint")
-        elif self.primary_metric_value is not None:
-            raise ValueError(
-                "non-completed result requires primary_metric_value to be None"
-            )
+        else:
+            if self.primary_metric_value is not None:
+                raise ValueError(
+                    "non-completed result requires primary_metric_value to be None"
+                )
+            _validate_non_empty(self.error_code, "error_code")
+            _validate_non_empty(self.error_summary, "error_summary")
+            if self.predictions_path is not None:
+                raise ValueError(
+                    "non-completed result requires predictions_path to be None"
+                )
+            if self.model_path is not None:
+                raise ValueError(
+                    "non-completed result requires model_path to be None"
+                )
+            if self.model_fingerprint is not None:
+                raise ValueError(
+                    "non-completed result requires model_fingerprint to be None"
+                )
+            if self.metrics:
+                raise ValueError("non-completed result requires metrics to be empty")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -395,17 +414,23 @@ class TrainingInstanceSnapshot:
     round_number: int
     state: str
     reproducible_evidence: bool
+    dataset_content_fingerprint: str
     dataset_version_fingerprint: str
     code_fingerprint: str
     configuration_fingerprint: str
     environment_fingerprint: str
     split_fingerprint: str
+    plan_fingerprint: str
+    approval_fingerprint: str
     random_seed: int
     parent_instance_id: str | None
+    parent_instance_fingerprint: str | None
     optimization_direction: str
     primary_metric_name: str
     primary_metric_value: float | None
     metrics: dict[str, float]
+    predictions_path: str | None
+    predictions_fingerprint: str | None
     model_fingerprint: str | None
     model_retention_reasons: tuple[str, ...]
     model_path: str | None
@@ -425,6 +450,10 @@ class TrainingInstanceSnapshot:
         )
         _validate_metrics(self.metrics)
         _validate_non_negative(self.duration_ms, "duration_ms")
+        _validate_parent_fingerprint(
+            self.parent_instance_id,
+            self.parent_instance_fingerprint,
+        )
         if self.state == "completed":
             if not self.reproducible_evidence:
                 raise ValueError(
@@ -436,6 +465,9 @@ class TrainingInstanceSnapshot:
                 )
             if self.error_code is not None:
                 raise ValueError("completed instance requires no error_code")
+            if self.error_summary is not None:
+                raise ValueError("completed instance requires no error_summary")
+            _validate_completed_instance_evidence(self)
         else:
             if self.reproducible_evidence:
                 raise ValueError(
@@ -445,10 +477,14 @@ class TrainingInstanceSnapshot:
                 raise ValueError(
                     "non-completed instance requires primary_metric_value to be None"
                 )
+            _validate_non_empty(self.error_code, "error_code")
+            _validate_non_empty(self.error_summary, "error_summary")
         object.__setattr__(
             self,
             "sop_source_eligible",
-            self.state == "completed" and self.reproducible_evidence,
+            self.state == "completed"
+            and self.reproducible_evidence
+            and _has_complete_instance_evidence(self),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -495,10 +531,9 @@ class RunRoundSnapshot:
             self.primary_metric_value,
             "primary_metric_value",
         )
-        if (
-            self.instance_state != "completed"
-            and self.primary_metric_value is not None
-        ):
+        if self.instance_state == "completed" and self.primary_metric_value is None:
+            raise ValueError("completed round requires primary_metric_value")
+        if self.instance_state != "completed" and self.primary_metric_value is not None:
             raise ValueError(
                 "non-completed round requires primary_metric_value to be None"
             )
@@ -544,6 +579,16 @@ class RunStatusSnapshot:
         )
         _validate_optional_metric(self.target_gap, "target_gap")
         _validate_non_negative(self.elapsed_ms, "elapsed_ms")
+        if self.state == "recovery_required":
+            _validate_non_empty(self.recovery_reason, "recovery_reason")
+            if self.recovery_actions != ("resume", "close"):
+                raise ValueError(
+                    "recovery_actions must be exactly ('resume', 'close')"
+                )
+        elif self.recovery_reason is not None or self.recovery_actions:
+            raise ValueError(
+                "recovery_reason and recovery_actions require recovery_required state"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -598,6 +643,19 @@ _RUN_STATES = frozenset(
     }
 )
 _RUN_RECOVERY_ACTIONS = frozenset({"resume", "close"})
+_COMPLETED_INSTANCE_EVIDENCE_FIELDS = (
+    "dataset_content_fingerprint",
+    "dataset_version_fingerprint",
+    "code_fingerprint",
+    "configuration_fingerprint",
+    "environment_fingerprint",
+    "split_fingerprint",
+    "plan_fingerprint",
+    "approval_fingerprint",
+    "predictions_path",
+    "predictions_fingerprint",
+    "model_fingerprint",
+)
 
 
 def _validate_state(value: str, allowed: frozenset[str], field_name: str) -> None:
@@ -623,6 +681,46 @@ def _validate_optional_metric(value: float | None, field_name: str) -> None:
 def _validate_metrics(metrics: dict[str, float]) -> None:
     for name, value in metrics.items():
         _validate_metric(value, f"metrics.{name}")
+
+
+def _validate_non_empty(value: str | None, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+
+
+def _validate_parent_fingerprint(
+    parent_instance_id: str | None,
+    parent_instance_fingerprint: str | None,
+) -> None:
+    if parent_instance_id is not None:
+        _validate_non_empty(parent_instance_id, "parent_instance_id")
+    if parent_instance_fingerprint is not None:
+        _validate_non_empty(
+            parent_instance_fingerprint,
+            "parent_instance_fingerprint",
+        )
+    if (parent_instance_id is None) != (parent_instance_fingerprint is None):
+        raise ValueError(
+            "parent_instance_fingerprint is required exactly when "
+            "parent_instance_id is present"
+        )
+
+
+def _validate_completed_instance_evidence(
+    snapshot: TrainingInstanceSnapshot,
+) -> None:
+    for field_name in _COMPLETED_INSTANCE_EVIDENCE_FIELDS:
+        _validate_non_empty(getattr(snapshot, field_name), field_name)
+
+
+def _has_complete_instance_evidence(
+    snapshot: TrainingInstanceSnapshot,
+) -> bool:
+    return all(
+        isinstance(getattr(snapshot, field_name), str)
+        and bool(getattr(snapshot, field_name).strip())
+        for field_name in _COMPLETED_INSTANCE_EVIDENCE_FIELDS
+    ) and snapshot.primary_metric_value is not None
 
 
 def _validate_non_negative(value: int, field_name: str) -> None:

@@ -55,25 +55,52 @@ def test_completed_instance_derives_sop_source_eligibility_and_serializes():
 
     assert snapshot.sop_source_eligible is True
     assert snapshot.to_dict()["sop_source_eligible"] is True
+    assert snapshot.to_dict()["dataset_content_fingerprint"] == "dataset-content-sha"
     assert snapshot.to_dict()["dataset_version_fingerprint"] == "dataset-version-sha"
+    assert snapshot.to_dict()["predictions_path"] == "predictions/instance-1.csv"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "dataset_content_fingerprint",
+        "dataset_version_fingerprint",
+        "code_fingerprint",
+        "configuration_fingerprint",
+        "environment_fingerprint",
+        "split_fingerprint",
+        "plan_fingerprint",
+        "approval_fingerprint",
+        "predictions_path",
+        "predictions_fingerprint",
+        "model_fingerprint",
+    ),
+)
+def test_completed_instance_rejects_empty_required_evidence(field_name):
+    with pytest.raises(ValueError, match=field_name):
+        instance_snapshot(**{field_name: ""})
+
+
+def test_parent_fingerprint_is_required_exactly_when_parent_is_present():
+    with pytest.raises(ValueError, match="parent_instance_fingerprint"):
+        instance_snapshot(parent_instance_id="instance-0")
+    with pytest.raises(ValueError, match="parent_instance_fingerprint"):
+        instance_snapshot(parent_instance_fingerprint="instance-0-sha")
 
 
 @pytest.mark.parametrize("state", ("failed", "timed_out", "stopped"))
 def test_non_completed_instance_cannot_claim_success(state):
-    snapshot = instance_snapshot(
-        state=state,
-        reproducible_evidence=False,
-        primary_metric_value=None,
-        metrics={},
-        model_fingerprint=None,
-        model_retention_reasons=(),
-        model_path=None,
-        error_code=f"worker_{state}",
-        error_summary=f"Worker {state}",
-    )
+    snapshot = non_completed_instance_snapshot(state)
 
     assert snapshot.sop_source_eligible is False
     assert snapshot.primary_metric_value is None
+
+
+@pytest.mark.parametrize("state", ("failed", "timed_out", "stopped"))
+@pytest.mark.parametrize("field_name", ("error_code", "error_summary"))
+def test_non_completed_instance_requires_error_details(state, field_name):
+    with pytest.raises(ValueError, match=field_name):
+        non_completed_instance_snapshot(state, **{field_name: ""})
 
 
 @pytest.mark.parametrize(
@@ -82,6 +109,7 @@ def test_non_completed_instance_cannot_claim_success(state):
         ({"reproducible_evidence": False}, "reproducible_evidence"),
         ({"primary_metric_value": None}, "primary_metric_value"),
         ({"error_code": "worker_failed"}, "error_code"),
+        ({"error_summary": "Worker failed"}, "error_summary"),
     ),
 )
 def test_completed_instance_requires_complete_reproducible_evidence(updates, message):
@@ -138,6 +166,32 @@ def test_training_execution_result_is_terminal_json_safe_and_governed():
         )
 
 
+@pytest.mark.parametrize("state", ("failed", "timed_out", "stopped"))
+@pytest.mark.parametrize("field_name", ("error_code", "error_summary"))
+def test_non_completed_execution_result_requires_error_details(state, field_name):
+    with pytest.raises(ValueError, match=field_name):
+        non_completed_execution_result(state, **{field_name: ""})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("predictions_path", Path("outputs/partial-predictions.csv")),
+        ("model_path", Path("outputs/partial-model.joblib")),
+        ("model_fingerprint", "partial-model-sha"),
+        ("metrics", {"roc_auc": 0.4}),
+    ),
+)
+def test_non_completed_execution_result_rejects_output_claims(field_name, value):
+    with pytest.raises(ValueError, match=field_name):
+        non_completed_execution_result(**{field_name: value})
+
+
+def test_completed_execution_result_requires_error_details_absent():
+    with pytest.raises(ValueError, match="error_summary"):
+        execution_result(error_summary="Unexpected warning")
+
+
 def test_run_status_serializes_rounds_performance_and_recovery_data():
     status = run_status_snapshot()
 
@@ -169,6 +223,49 @@ def test_run_and_round_states_use_explicit_names():
         instance_snapshot(state="interrupted")
 
 
+def test_completed_round_requires_primary_metric():
+    with pytest.raises(ValueError, match="primary_metric_value"):
+        replace(run_status_snapshot().rounds[0], primary_metric_value=None)
+
+
+@pytest.mark.parametrize("state", ("failed", "timed_out", "stopped"))
+def test_non_completed_round_forbids_primary_metric(state):
+    with pytest.raises(ValueError, match="primary_metric_value"):
+        replace(run_status_snapshot().rounds[0], instance_state=state)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"recovery_reason": None, "recovery_actions": ("resume", "close")},
+        {"recovery_reason": "interrupted", "recovery_actions": ()},
+        {"recovery_reason": "interrupted", "recovery_actions": ("resume",)},
+        {
+            "recovery_reason": "interrupted",
+            "recovery_actions": ("close", "resume"),
+        },
+    ),
+)
+def test_recovery_required_state_requires_exact_recovery_data(updates):
+    values = {"state": "recovery_required", "ended_at": None}
+    values.update(updates)
+
+    with pytest.raises(ValueError, match="recovery"):
+        run_status_snapshot(**values)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    (
+        {"recovery_reason": "interrupted"},
+        {"recovery_actions": ("resume", "close")},
+    ),
+)
+def test_other_run_states_forbid_recovery_data(updates):
+    with pytest.raises(ValueError, match="recovery"):
+        run_status_snapshot(**updates)
+
+
 def instance_snapshot(**updates) -> TrainingInstanceSnapshot:
     values = {
         "asset_id": "instance-1",
@@ -177,17 +274,23 @@ def instance_snapshot(**updates) -> TrainingInstanceSnapshot:
         "round_number": 1,
         "state": "completed",
         "reproducible_evidence": True,
+        "dataset_content_fingerprint": "dataset-content-sha",
         "dataset_version_fingerprint": "dataset-version-sha",
         "code_fingerprint": "code-sha",
         "configuration_fingerprint": "config-sha",
         "environment_fingerprint": "environment-sha",
         "split_fingerprint": "split-sha",
+        "plan_fingerprint": "plan-sha",
+        "approval_fingerprint": "approval-sha",
         "random_seed": 42,
         "parent_instance_id": None,
+        "parent_instance_fingerprint": None,
         "optimization_direction": "baseline",
         "primary_metric_name": "roc_auc",
         "primary_metric_value": 0.82,
         "metrics": {"roc_auc": 0.82, "accuracy": 0.8},
+        "predictions_path": "predictions/instance-1.csv",
+        "predictions_fingerprint": "predictions-sha",
         "model_fingerprint": "model-sha",
         "model_retention_reasons": ("baseline",),
         "model_path": "models/instance-1.joblib",
@@ -199,6 +302,26 @@ def instance_snapshot(**updates) -> TrainingInstanceSnapshot:
     }
     values.update(updates)
     return TrainingInstanceSnapshot(**values)
+
+
+def non_completed_instance_snapshot(
+    state="failed", **updates
+) -> TrainingInstanceSnapshot:
+    values = {
+        "state": state,
+        "reproducible_evidence": False,
+        "primary_metric_value": None,
+        "metrics": {},
+        "predictions_path": None,
+        "predictions_fingerprint": None,
+        "model_fingerprint": None,
+        "model_retention_reasons": (),
+        "model_path": None,
+        "error_code": f"worker_{state}",
+        "error_summary": f"Worker {state}",
+    }
+    values.update(updates)
+    return instance_snapshot(**values)
 
 
 def execution_result(**updates) -> TrainingExecutionResult:
@@ -218,6 +341,23 @@ def execution_result(**updates) -> TrainingExecutionResult:
     }
     values.update(updates)
     return TrainingExecutionResult(**values)
+
+
+def non_completed_execution_result(
+    state="failed", **updates
+) -> TrainingExecutionResult:
+    values = {
+        "state": state,
+        "primary_metric_value": None,
+        "metrics": {},
+        "predictions_path": None,
+        "model_path": None,
+        "model_fingerprint": None,
+        "error_code": f"worker_{state}",
+        "error_summary": f"Worker {state}",
+    }
+    values.update(updates)
+    return execution_result(**values)
 
 
 def run_status_snapshot(**updates) -> RunStatusSnapshot:
