@@ -14,6 +14,7 @@
 
 - `src/domain/models.py`: public commands and immutable Run/Training Instance query snapshots.
 - `src/domain/run_repository.py`: append-only events, code freeze, pending packages, sealing, loading, recovery, retention, and status projection.
+- `src/domain/local_index.py`: index Run events and package manifests without treating evidence-component JSON as standalone assets.
 - `src/domain/run_execution.py`: approved-plan orchestration and terminal state decisions.
 - `src/domain/core.py`: single public command/query boundary and exact Issue #4 authorization reuse.
 - `src/training/executor.py`: worker process lifecycle, timeout, stop polling, and bounded errors.
@@ -152,6 +153,7 @@ git commit -m "feat(domain): define governed run contracts"
 
 **Files:**
 - Create: `src/domain/run_repository.py`
+- Modify: `src/domain/local_index.py`
 - Create: `tests/integration/test_run_repository.py`
 
 - [ ] **Step 1: Write failing repository tests**
@@ -196,14 +198,16 @@ ALLOWED_EVENT_FIELDS = {
     "plan_id", "plan_event_id", "approval_id", "instance_id",
     "round_number", "parent_instance_id", "hypothesis",
     "optimization_direction", "primary_metric_name", "primary_metric_value",
-    "reason_code", "error_summary", "evidence_refs", "created_at",
+    "reason_code", "error_summary", "evidence_refs", "next_action", "created_at",
     "created_by", "event_fingerprint",
 }
 ```
 
-Implement canonical SHA-256 serialization, safe ID/path validation, `.mlagent-local/run-locks` locking,
-atomic temporary-directory rename, manifest/file hash validation, and no-overwrite behavior. Reuse the
-capacity values supplied by `MemoryRepository` and reject any retained file at or above `max_file_bytes`.
+Implement canonical SHA-256 serialization, safe ID/path validation, persistent `.mlagent-local/run-locks`
+files, atomic temporary-directory rename, manifest/file hash validation, and no-overwrite behavior. Hold
+the per-Run lock before discovering the event head and through publication. Hold a repository-wide capacity
+lock for capacity-sensitive writes, refresh actual managed bytes inside it, and reject any retained file or
+projected repository size at or above the configured maximum.
 
 - [ ] **Step 4: Implement code freeze, retention, projection, and recovery**
 
@@ -212,6 +216,10 @@ capacity values supplied by `MemoryRepository` and reject any retained file at o
 must retain baseline, stage-best, or human-marked models and remove other model binaries after hashing.
 `status()` reconstructs rounds and terminal state from events and detects a nonterminal head or pending
 directory as `recovery_required`.
+
+Update `LocalIndex` so committed Run Raw Record events and package `manifest.json` files are indexable
+assets, while `input.json`, `environment.json`, `metrics.json`, and other evidence components are excluded.
+Add a real commit-and-rebuild test proving the index remains reconstructable.
 
 - [ ] **Step 5: Run repository tests and verify GREEN**
 
@@ -222,7 +230,7 @@ Expected: PASS, including immutable reload and recovery cases.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/domain/run_repository.py tests/integration/test_run_repository.py
+git add src/domain/run_repository.py src/domain/local_index.py tests/integration/test_run_repository.py
 git commit -m "feat(memory): seal training instance evidence"
 ```
 

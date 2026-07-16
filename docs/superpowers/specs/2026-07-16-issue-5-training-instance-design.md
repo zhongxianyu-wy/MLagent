@@ -87,7 +87,9 @@ Each Raw Record event contains only:
 
 Events do not contain prompts, complete conversation history, repeated console output, full stack traces, or
 unrelated tool activity. Event fingerprints cover their canonical content. Local writes are serialized by
-an ignored lock file, and each new event points to the current causal head.
+an ignored per-Run lock file, and each new event points to the current causal head. Capacity-sensitive
+publication also takes one repository-wide capacity lock and refreshes current usage before writing, so two
+different Runs cannot both rely on a stale capacity snapshot.
 
 Run states are deterministic:
 
@@ -190,6 +192,11 @@ The existing Run Status module keeps its pre-run plan review. When Runs exist, i
 summary metrics, performance curve, round table, best/target comparison, retained-model labels, and a Stop
 action for an active Run. A Streamlit fragment polls the Domain Core every two seconds. The UI is only a
 projection and remains optional for execution.
+
+The Local Index indexes Run Raw Record events and package `manifest.json` assets only. Component files such
+as `input.json`, `environment.json`, and `metrics.json` remain immutable evidence referenced by the instance
+manifest, but do not appear as independent domain assets or clutter search results. Index rebuild must
+preserve this distinction from a committed empty index.
 
 ## 10. CLI Flow
 
