@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.domain.models import SyncStatusSnapshot
+from src.domain.models import SessionExperienceOutcome, SyncStatusSnapshot
 
 
 STATE_LABELS = {
@@ -33,6 +33,32 @@ def bounded_sync_message(status: SyncStatusSnapshot) -> str:
     if status.next_action:
         parts.append(f"Next: {_clean(status.next_action, 260)}")
     return _bounded(" ".join(parts))
+
+
+def bounded_session_start_message(
+    outcome: SessionExperienceOutcome,
+) -> str:
+    return _bounded(
+        f"Experience Review: {outcome.pending_review_count} pending. "
+        f"{bounded_sync_message(_require_sync(outcome))}"
+    )
+
+
+def bounded_session_stop_message(
+    outcome: SessionExperienceOutcome,
+) -> str:
+    if outcome.outcome == "created":
+        experience = (
+            f"Created {len(outcome.candidate_ids)} low-confidence "
+            "Experience candidate(s) for human review."
+        )
+    elif outcome.outcome == "no_op":
+        experience = "No reusable Experience found; recorded no-op."
+    else:
+        experience = "Experience extraction was already completed."
+    return _bounded(
+        f"{experience} {bounded_sync_message(_require_sync(outcome))}"
+    )
 
 
 def bounded_failure_message(code: str) -> str:
@@ -69,3 +95,11 @@ def _clean(value: str, limit: int) -> str:
 
 def _bounded(value: str) -> str:
     return value[:OUTPUT_LIMIT]
+
+
+def _require_sync(
+    outcome: SessionExperienceOutcome,
+) -> SyncStatusSnapshot:
+    if outcome.sync is None:
+        raise ValueError("Session outcome requires synchronization status")
+    return outcome.sync

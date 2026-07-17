@@ -19,6 +19,7 @@ from src.domain.models import (
     ApproveExplorationPlanCommand,
     AuthorizeTrainingCommand,
     BootstrapMemoryCommand,
+    CompleteSessionCommand,
     ConfirmedDatasetReference,
     ConfirmDatasetCommand,
     DatasetInspection,
@@ -38,6 +39,7 @@ from src.domain.models import (
     ReviewExperienceCommand,
     RunStatusSnapshot,
     SessionStopSyncCommand,
+    SessionExperienceOutcome,
     SyncStatusSnapshot,
     TrainingAuthorization,
     WorkspaceConnection,
@@ -138,6 +140,24 @@ class DomainCore:
             LocalIndex(repository.repository_path).rebuild()
         return status
 
+    def start_session(
+        self,
+        connection_path: Path,
+        session_id: str,
+    ) -> SessionExperienceOutcome:
+        status = self.sync_session_start(connection_path)
+        connection, repository = self._open_connected_repository(
+            connection_path
+        )
+        outcome = self._experience_repository(
+            repository.repository_path
+        ).start_session(
+            session_id,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        return replace(outcome, sync=status)
+
     def sync_session_stop(
         self,
         command: SessionStopSyncCommand,
@@ -150,6 +170,28 @@ class DomainCore:
             connection.actor_id,
             clock=self.clock,
         ).session_stop(command.session_id)
+
+    def complete_session(
+        self,
+        command: CompleteSessionCommand,
+    ) -> SessionExperienceOutcome:
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        outcome = self._experience_repository(
+            repository.repository_path
+        ).complete_session(
+            command.session_id,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        sync = self.sync_session_stop(
+            SessionStopSyncCommand(
+                connection_path=command.connection_path,
+                session_id=command.session_id,
+            )
+        )
+        return replace(outcome, sync=sync)
 
     def get_sync_status(
         self,

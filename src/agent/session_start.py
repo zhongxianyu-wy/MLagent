@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from src.agent.sync_output import (
     bounded_failure_message,
-    bounded_sync_message,
+    bounded_session_start_message,
     resolve_connection_path,
 )
 from src.domain.models import WorkspaceError
@@ -20,17 +20,21 @@ def handle(
 ) -> dict[str, object]:
     if payload.get("hook_event_name") != "SessionStart":
         raise ValueError("hook_event_name must be SessionStart")
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id is required")
     if domain_core is None:
         from src.domain.core import DomainCore
 
         domain_core = DomainCore()
-    status = domain_core.sync_session_start(
-        resolve_connection_path(payload, environment or os.environ)
+    outcome = domain_core.start_session(
+        resolve_connection_path(payload, environment or os.environ),
+        session_id,
     )
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": bounded_sync_message(status),
+            "additionalContext": bounded_session_start_message(outcome),
         }
     }
 

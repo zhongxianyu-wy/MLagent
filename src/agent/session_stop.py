@@ -7,10 +7,10 @@ from typing import Any, Mapping
 
 from src.agent.sync_output import (
     bounded_failure_message,
-    bounded_sync_message,
+    bounded_session_stop_message,
     resolve_connection_path,
 )
-from src.domain.models import SessionStopSyncCommand, WorkspaceError
+from src.domain.models import CompleteSessionCommand, WorkspaceError
 
 
 def handle(
@@ -27,8 +27,8 @@ def handle(
         from src.domain.core import DomainCore
 
         domain_core = DomainCore()
-    status = domain_core.sync_session_stop(
-        SessionStopSyncCommand(
+    outcome = domain_core.complete_session(
+        CompleteSessionCommand(
             connection_path=resolve_connection_path(
                 payload,
                 environment or os.environ,
@@ -36,7 +36,7 @@ def handle(
             session_id=session_id,
         )
     )
-    return {"systemMessage": bounded_sync_message(status)}
+    return {"systemMessage": bounded_session_stop_message(outcome)}
 
 
 def main() -> int:

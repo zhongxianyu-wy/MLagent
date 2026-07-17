@@ -116,15 +116,26 @@ def test_session_start_hook_delegates_and_emits_bounded_context(
     assert len(output["additionalContext"]) <= 800
     assert str(configured_hook_workspace.remote) not in result.stdout
     assert "secret-token" not in result.stdout
+    assert (
+        configured_hook_workspace.memory
+        / "raw-records/sessions/session-1/start.json"
+    ).is_file()
 
 
 def test_stop_hook_commits_managed_changes_without_blocking_stop(
     configured_hook_workspace,
 ):
-    (configured_hook_workspace.memory / "experiences/candidate.json").write_text(
-        '{"asset_type":"experience_candidate","asset_id":"candidate-1"}\n',
-        encoding="utf-8",
+    started = run_hook(
+        ".claude/hooks/mlagent-session-start.sh",
+        {
+            "session_id": "session-1",
+            "cwd": str(configured_hook_workspace.root),
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+        },
+        configured_hook_workspace.environment,
     )
+    assert started.returncode == 0
 
     result = run_hook(
         ".claude/hooks/mlagent-session-stop.sh",
@@ -144,12 +155,20 @@ def test_stop_hook_commits_managed_changes_without_blocking_stop(
     payload = json.loads(result.stdout)
     assert payload.get("decision") is None
     assert "Synced" in payload["systemMessage"]
+    assert "no reusable experience" in payload["systemMessage"].lower()
     assert len(payload["systemMessage"]) <= 800
     assert (
         git(configured_hook_workspace.memory, "rev-parse", "HEAD").stdout.strip()
         != configured_hook_workspace.initial_head
     )
     assert str(configured_hook_workspace.remote) not in result.stdout
+    stop_record = json.loads(
+        (
+            configured_hook_workspace.memory
+            / "raw-records/sessions/session-1/stop.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert stop_record["outcome"] == "no_op"
 
 
 @pytest.mark.parametrize(
