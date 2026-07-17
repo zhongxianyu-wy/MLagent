@@ -14,11 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from src.domain.dataset_repository import DatasetRepository
+from src.domain.memory_repository import load_authorized_reviewers
 from src.domain.models import (
     CapacityStatus,
+    FormalModelSnapshot,
     SopCandidateSnapshot,
     SopEvidenceReference,
     SopReproductionGateSnapshot,
+    SopReviewOutcome,
+    SopVersionSnapshot,
     WorkspaceError,
 )
 from src.domain.run_repository import RunRepository
@@ -27,6 +31,8 @@ from src.domain.run_repository import RunRepository
 SOP_SCHEMA_VERSION = 1
 SOP_CANDIDATE_ROOT = Path("sops/candidates")
 SOP_REPRODUCTION_ROOT = Path("approvals/sop-reproductions")
+SOP_APPROVAL_ROOT = Path("approvals/sops")
+FORMAL_MODEL_ROOT = Path("models/formal")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 INSTANCE_FILE_ROLES = {
     "input": "input",
@@ -92,12 +98,41 @@ class SopReproductionGateSpec:
     comparisons: dict[str, bool]
 
 
+@dataclass(frozen=True)
+class SopReviewSpec:
+    candidate_id: str
+    expected_candidate_fingerprint: str
+    expected_gate_fingerprint: str
+    decision: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.candidate_id, str)
+            or SAFE_ID_PATTERN.fullmatch(self.candidate_id) is None
+        ):
+            raise ValueError("candidate_id must be a safe stable ID")
+        for field_name in (
+            "expected_candidate_fingerprint",
+            "expected_gate_fingerprint",
+        ):
+            value = getattr(self, field_name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{field_name} must be a SHA-256 digest")
+        if self.decision not in {"approve", "reject"}:
+            raise ValueError("decision must be approve or reject")
+
+
 class SopRepository:
     def __init__(
         self,
         repository_path: Path,
         candidate_id_factory: Callable[[], str] | None = None,
         gate_id_factory: Callable[[], str] | None = None,
+        approval_id_factory: Callable[[], str] | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
         unresolved = repository_path.expanduser()
@@ -109,6 +144,9 @@ class SopRepository:
         )
         self.gate_id_factory = gate_id_factory or (
             lambda: f"sop-gate-{uuid.uuid4()}"
+        )
+        self.approval_id_factory = approval_id_factory or (
+            lambda: f"sop-approval-{uuid.uuid4()}"
         )
         self.clock = clock or _utc_now
 
@@ -519,6 +557,679 @@ class SopRepository:
                 next_action="Restore the append-only gate history from Git.",
             )
         return self.load_gate(paths[0].stem, candidate_id)
+
+    def review_candidate(
+        self,
+        spec: SopReviewSpec,
+        actor_id: str,
+        capacity: CapacityStatus,
+    ) -> SopReviewOutcome:
+        self._validate_actor(actor_id)
+        if actor_id not in load_authorized_reviewers(self.repository_path):
+            raise WorkspaceError(
+                code="unauthorized_sop_reviewer",
+                message=f"Team member is not authorized to review SOPs: {actor_id}.",
+                next_action="Use an identity listed in approvals/reviewer-policy.json.",
+            )
+        candidate, gate, chain = self._validated_review_chain(spec)
+        if gate.outcome != "passed":
+            raise WorkspaceError(
+                code="sop_gate_not_passed",
+                message=f"SOP reproduction gate did not pass: {gate.outcome}.",
+                next_action="Create a new candidate and complete an exact independent reproduction.",
+            )
+        with self._lock():
+            existing = self._find_candidate_review(candidate.asset_id)
+            if existing is not None:
+                if existing["decision"] != spec.decision:
+                    raise WorkspaceError(
+                        code="sop_review_exists",
+                        message="This SOP candidate already has a different review decision.",
+                        next_action="Keep the immutable decision or create a new candidate.",
+                    )
+                return self._review_outcome(existing)
+            approval_id = self._new_approval_id()
+            if spec.decision == "reject":
+                relative = (
+                    SOP_APPROVAL_ROOT
+                    / candidate.sop_id
+                    / "rejections"
+                    / f"{approval_id}.json"
+                )
+                payload: dict[str, Any] = {
+                    "asset_type": "sop_review",
+                    "asset_id": approval_id,
+                    "schema_version": SOP_SCHEMA_VERSION,
+                    "decision": "reject",
+                    "candidate_id": candidate.asset_id,
+                    "candidate_fingerprint": candidate.candidate_fingerprint,
+                    "gate_id": gate.asset_id,
+                    "gate_fingerprint": gate.gate_fingerprint,
+                    "sop_id": candidate.sop_id,
+                    "created_at": self._timestamp(),
+                    "created_by": actor_id,
+                }
+                payload["approval_fingerprint"] = _fingerprint(payload)
+                self._write_new_file(
+                    self.repository_path / relative,
+                    _json_bytes(payload),
+                    capacity,
+                )
+                return self._review_outcome(payload)
+
+            version = self._next_version(candidate.sop_id)
+            previous = (
+                None
+                if version == 1
+                else self.load_sop_version(candidate.sop_id, version - 1)
+            )
+            if version > 1 and not candidate.change_summary.strip():
+                raise WorkspaceError(
+                    code="missing_sop_change_summary",
+                    message="A new SOP Version requires a change summary.",
+                    next_action="Create a new candidate describing the version change.",
+                )
+            version_name = f"v{version:04d}"
+            sop_version_id = f"{candidate.sop_id}-{version_name}"
+            formal_model_id = f"model-{candidate.sop_id}-{version_name}"
+            sop_relative = (
+                Path("sops")
+                / candidate.sop_id
+                / version_name
+                / "manifest.json"
+            )
+            model_relative = FORMAL_MODEL_ROOT / formal_model_id / "model.joblib"
+            model_manifest_relative = (
+                FORMAL_MODEL_ROOT / formal_model_id / "manifest.json"
+            )
+            approval_relative = (
+                SOP_APPROVAL_ROOT
+                / candidate.sop_id
+                / version_name
+                / f"{approval_id}.json"
+            )
+            created_at = self._timestamp()
+            model_bytes = chain["reproduction_model_path"].read_bytes()
+            model_fingerprint = _sha256(model_bytes)
+            model_manifest: dict[str, Any] = {
+                "asset_type": "formal_model",
+                "asset_id": formal_model_id,
+                "schema_version": SOP_SCHEMA_VERSION,
+                "model_path": model_relative.as_posix(),
+                "model_fingerprint": model_fingerprint,
+                "sop_version_id": sop_version_id,
+                "source_instance_id": candidate.source_instance_id,
+                "reproduction_instance_id": gate.reproduction_instance_id,
+                "dataset_id": candidate.dataset_id,
+                "dataset_version": candidate.dataset_version,
+                "primary_metric_name": candidate.primary_metric_name,
+                "primary_metric_value": gate.reproduction_metric_value,
+                "strategy_summary": candidate.strategy_summary,
+                "optimization_background": candidate.optimization_background,
+                "approval_id": approval_id,
+                "created_at": created_at,
+                "created_by": actor_id,
+            }
+            model_manifest["manifest_fingerprint"] = _fingerprint(
+                model_manifest
+            )
+            sop_manifest: dict[str, Any] = {
+                "asset_type": "sop_version",
+                "asset_id": sop_version_id,
+                "schema_version": SOP_SCHEMA_VERSION,
+                "sop_id": candidate.sop_id,
+                "name": candidate.name,
+                "version": version,
+                "previous_version_id": (
+                    None if previous is None else previous.asset_id
+                ),
+                "previous_version_fingerprint": (
+                    None
+                    if previous is None
+                    else previous.version_fingerprint
+                ),
+                "candidate_id": candidate.asset_id,
+                "candidate_fingerprint": candidate.candidate_fingerprint,
+                "gate_id": gate.asset_id,
+                "gate_fingerprint": gate.gate_fingerprint,
+                "source_run_id": candidate.source_run_id,
+                "source_instance_id": candidate.source_instance_id,
+                "reproduction_run_id": gate.reproduction_run_id,
+                "reproduction_instance_id": gate.reproduction_instance_id,
+                "dataset_id": candidate.dataset_id,
+                "dataset_version": candidate.dataset_version,
+                "primary_metric_name": candidate.primary_metric_name,
+                "primary_metric_value": gate.reproduction_metric_value,
+                "strategy_summary": candidate.strategy_summary,
+                "optimization_background": candidate.optimization_background,
+                "steps": list(candidate.steps),
+                "change_summary": candidate.change_summary,
+                "approval_id": approval_id,
+                "formal_model_id": formal_model_id,
+                "created_at": created_at,
+                "created_by": actor_id,
+            }
+            sop_manifest["version_fingerprint"] = _fingerprint(sop_manifest)
+            approval: dict[str, Any] = {
+                "asset_type": "sop_review",
+                "asset_id": approval_id,
+                "schema_version": SOP_SCHEMA_VERSION,
+                "decision": "approve",
+                "candidate_id": candidate.asset_id,
+                "candidate_fingerprint": candidate.candidate_fingerprint,
+                "gate_id": gate.asset_id,
+                "gate_fingerprint": gate.gate_fingerprint,
+                "sop_id": candidate.sop_id,
+                "sop_version_id": sop_version_id,
+                "sop_version_fingerprint": sop_manifest[
+                    "version_fingerprint"
+                ],
+                "formal_model_id": formal_model_id,
+                "formal_model_manifest_fingerprint": model_manifest[
+                    "manifest_fingerprint"
+                ],
+                "model_fingerprint": model_fingerprint,
+                "created_at": created_at,
+                "created_by": actor_id,
+            }
+            approval["approval_fingerprint"] = _fingerprint(approval)
+            encoded = {
+                self.repository_path / model_relative: model_bytes,
+                self.repository_path / model_manifest_relative: _json_bytes(
+                    model_manifest
+                ),
+                self.repository_path / sop_relative: _json_bytes(sop_manifest),
+                self.repository_path / approval_relative: _json_bytes(approval),
+            }
+            self._validate_publication_capacity(encoded, capacity)
+            for target in (
+                self.repository_path / model_relative,
+                self.repository_path / model_manifest_relative,
+                self.repository_path / sop_relative,
+            ):
+                self._publish_exact_file(target, encoded[target])
+            self._publish_exact_file(
+                self.repository_path / approval_relative,
+                encoded[self.repository_path / approval_relative],
+            )
+            return SopReviewOutcome(
+                decision="approve",
+                candidate_id=candidate.asset_id,
+                gate_id=gate.asset_id,
+                approval_id=approval_id,
+                sop_version=self.load_sop_version(
+                    candidate.sop_id,
+                    version,
+                ),
+                formal_model=self.get_formal_model(formal_model_id),
+            )
+
+    def list_sop_versions(
+        self,
+        sop_id: str | None = None,
+    ) -> tuple[SopVersionSnapshot, ...]:
+        roots: list[Path]
+        if sop_id is not None:
+            self._validate_id(sop_id, "sop_id")
+            roots = [self.repository_path / "sops" / sop_id]
+        else:
+            sop_root = self.repository_path / "sops"
+            self._validate_path(sop_root)
+            roots = [
+                path
+                for path in sorted(sop_root.iterdir())
+                if path.is_dir() and path.name != "candidates"
+            ] if sop_root.is_dir() else []
+        versions = []
+        for root in roots:
+            self._validate_path(root)
+            if not root.is_dir():
+                continue
+            for directory in sorted(root.iterdir()):
+                match = re.fullmatch(r"v([0-9]{4})", directory.name)
+                if not directory.is_dir() or match is None:
+                    continue
+                manifest = directory / "manifest.json"
+                if not manifest.is_file():
+                    continue
+                payload = self._load_json(manifest, "invalid_sop_version")
+                approval_id = payload.get("approval_id")
+                if not isinstance(approval_id, str):
+                    continue
+                approval = (
+                    self.repository_path
+                    / SOP_APPROVAL_ROOT
+                    / root.name
+                    / directory.name
+                    / f"{approval_id}.json"
+                )
+                if approval.is_file():
+                    versions.append(
+                        self.load_sop_version(root.name, int(match.group(1)))
+                    )
+        return tuple(
+            sorted(versions, key=lambda item: (item.sop_id, item.version))
+        )
+
+    def load_sop_version(
+        self,
+        sop_id: str,
+        version: int,
+    ) -> SopVersionSnapshot:
+        self._validate_id(sop_id, "sop_id")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise WorkspaceError(
+                code="invalid_sop_version",
+                message="SOP Version number must be positive.",
+                next_action="Choose a version listed by SOP Overview.",
+            )
+        version_name = f"v{version:04d}"
+        relative = Path("sops") / sop_id / version_name / "manifest.json"
+        payload = self._load_json(
+            self.repository_path / relative,
+            "invalid_sop_version",
+        )
+        canonical = dict(payload)
+        fingerprint = canonical.pop("version_fingerprint", None)
+        if (
+            payload.get("asset_type") != "sop_version"
+            or payload.get("sop_id") != sop_id
+            or payload.get("version") != version
+            or payload.get("schema_version") != SOP_SCHEMA_VERSION
+            or fingerprint != _fingerprint(canonical)
+        ):
+            self._invalid_version(sop_id, version)
+        approval = self._load_approval(
+            sop_id,
+            version_name,
+            payload.get("approval_id"),
+        )
+        model = self.get_formal_model(payload.get("formal_model_id"))
+        model_manifest = self._load_json(
+            self.repository_path / model.asset_path,
+            "invalid_formal_model",
+        )
+        candidate = self.load_candidate(payload.get("candidate_id"))
+        gate = self.load_gate(
+            payload.get("gate_id"),
+            candidate.asset_id,
+        )
+        if (
+            approval.get("decision") != "approve"
+            or approval.get("candidate_id") != candidate.asset_id
+            or approval.get("candidate_fingerprint")
+            != candidate.candidate_fingerprint
+            or approval.get("gate_id") != gate.asset_id
+            or approval.get("gate_fingerprint") != gate.gate_fingerprint
+            or approval.get("sop_version_id") != payload.get("asset_id")
+            or approval.get("sop_version_fingerprint") != fingerprint
+            or approval.get("formal_model_id") != model.asset_id
+            or approval.get("formal_model_manifest_fingerprint")
+            != model_manifest.get("manifest_fingerprint")
+            or approval.get("model_fingerprint") != model.model_fingerprint
+            or payload.get("candidate_fingerprint")
+            != candidate.candidate_fingerprint
+            or payload.get("gate_fingerprint") != gate.gate_fingerprint
+            or gate.outcome != "passed"
+            or model.sop_version_id != payload.get("asset_id")
+            or model.approval_id != payload.get("approval_id")
+            or model.source_instance_id
+            != payload.get("source_instance_id")
+            or model.reproduction_instance_id
+            != payload.get("reproduction_instance_id")
+            or model.dataset_id != payload.get("dataset_id")
+            or model.dataset_version != payload.get("dataset_version")
+        ):
+            self._invalid_version(sop_id, version)
+        if version > 1:
+            previous = self.load_sop_version(sop_id, version - 1)
+            if (
+                payload.get("previous_version_id") != previous.asset_id
+                or payload.get("previous_version_fingerprint")
+                != previous.version_fingerprint
+            ):
+                self._invalid_version(sop_id, version)
+        try:
+            return SopVersionSnapshot(
+                asset_id=payload["asset_id"],
+                asset_path=relative.as_posix(),
+                sop_id=payload["sop_id"],
+                version=payload["version"],
+                version_fingerprint=payload["version_fingerprint"],
+                previous_version_id=payload["previous_version_id"],
+                previous_version_fingerprint=payload[
+                    "previous_version_fingerprint"
+                ],
+                candidate_id=payload["candidate_id"],
+                source_run_id=payload["source_run_id"],
+                source_instance_id=payload["source_instance_id"],
+                reproduction_run_id=payload["reproduction_run_id"],
+                reproduction_instance_id=payload[
+                    "reproduction_instance_id"
+                ],
+                dataset_id=payload["dataset_id"],
+                dataset_version=payload["dataset_version"],
+                primary_metric_name=payload["primary_metric_name"],
+                primary_metric_value=float(payload["primary_metric_value"]),
+                strategy_summary=payload["strategy_summary"],
+                optimization_background=payload[
+                    "optimization_background"
+                ],
+                steps=tuple(payload["steps"]),
+                change_summary=payload["change_summary"],
+                approval_id=payload["approval_id"],
+                formal_model_id=payload["formal_model_id"],
+                created_at=payload["created_at"],
+                created_by=payload["created_by"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise WorkspaceError(
+                code="invalid_sop_version",
+                message=f"SOP Version is invalid: {sop_id} {version_name}.",
+                next_action="Restore the complete approved version from Git.",
+            ) from error
+
+    def get_formal_model(self, model_id: str) -> FormalModelSnapshot:
+        self._validate_id(model_id, "model_id")
+        relative = FORMAL_MODEL_ROOT / model_id / "manifest.json"
+        payload = self._load_json(
+            self.repository_path / relative,
+            "invalid_formal_model",
+        )
+        canonical = dict(payload)
+        fingerprint = canonical.pop("manifest_fingerprint", None)
+        model_path_value = payload.get("model_path")
+        if not isinstance(model_path_value, str):
+            self._invalid_model(model_id)
+        model_path = self.repository_path / model_path_value
+        self._validate_path(model_path)
+        if (
+            payload.get("asset_type") != "formal_model"
+            or payload.get("asset_id") != model_id
+            or payload.get("schema_version") != SOP_SCHEMA_VERSION
+            or fingerprint != _fingerprint(canonical)
+            or model_path.is_symlink()
+            or not model_path.is_file()
+            or payload.get("model_fingerprint")
+            != _sha256(model_path.read_bytes())
+        ):
+            self._invalid_model(model_id)
+        try:
+            return FormalModelSnapshot(
+                asset_id=payload["asset_id"],
+                asset_path=relative.as_posix(),
+                model_path=payload["model_path"],
+                model_fingerprint=payload["model_fingerprint"],
+                sop_version_id=payload["sop_version_id"],
+                source_instance_id=payload["source_instance_id"],
+                reproduction_instance_id=payload[
+                    "reproduction_instance_id"
+                ],
+                dataset_id=payload["dataset_id"],
+                dataset_version=payload["dataset_version"],
+                primary_metric_name=payload["primary_metric_name"],
+                primary_metric_value=float(payload["primary_metric_value"]),
+                strategy_summary=payload["strategy_summary"],
+                optimization_background=payload[
+                    "optimization_background"
+                ],
+                approval_id=payload["approval_id"],
+                created_at=payload["created_at"],
+                created_by=payload["created_by"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise WorkspaceError(
+                code="invalid_formal_model",
+                message=f"Formal Model is invalid: {model_id}.",
+                next_action="Restore the complete Formal Model from Git.",
+            ) from error
+
+    def _validated_review_chain(
+        self,
+        spec: SopReviewSpec,
+    ) -> tuple[
+        SopCandidateSnapshot,
+        SopReproductionGateSnapshot,
+        dict[str, Any],
+    ]:
+        candidate = self.validate_candidate_source(
+            spec.candidate_id,
+            spec.expected_candidate_fingerprint,
+        )
+        gate = self.load_gate_for_candidate(candidate.asset_id)
+        if gate is None:
+            raise WorkspaceError(
+                code="sop_gate_not_passed",
+                message="SOP candidate has no independent reproduction gate.",
+                next_action="Run independent reproduction before review.",
+            )
+        if gate.gate_fingerprint != spec.expected_gate_fingerprint:
+            raise WorkspaceError(
+                code="stale_sop_review",
+                message="SOP reproduction gate changed before review.",
+                next_action="Reload the candidate and gate before deciding.",
+            )
+        if (
+            gate.candidate_id != candidate.asset_id
+            or gate.candidate_fingerprint != candidate.candidate_fingerprint
+            or gate.source_run_id != candidate.source_run_id
+            or gate.source_instance_id != candidate.source_instance_id
+        ):
+            raise WorkspaceError(
+                code="invalid_sop_reproduction_gate",
+                message="SOP reproduction gate does not belong to the candidate.",
+                next_action="Restore the candidate and gate from Git.",
+            )
+        if gate.outcome != "passed":
+            return candidate, gate, {}
+        gate_payload = self._load_json(
+            self.repository_path / gate.asset_path,
+            "invalid_sop_reproduction_gate",
+        )
+        comparisons = gate_payload.get("comparisons")
+        if (
+            not isinstance(comparisons, dict)
+            or not comparisons
+            or not all(value is True for value in comparisons.values())
+        ):
+            self._invalid_gate(gate.asset_id)
+        run_repository = RunRepository(self.repository_path)
+        source = run_repository.load_instance(
+            gate.source_run_id,
+            gate.source_instance_id,
+        )
+        reproduction = run_repository.load_instance(
+            gate.reproduction_run_id,
+            gate.reproduction_instance_id,
+        )
+        if (
+            source.run_id == reproduction.run_id
+            or source.asset_id == reproduction.asset_id
+            or reproduction.state != "completed"
+            or reproduction.model_retention_reasons
+            != ("sop_reproduction",)
+        ):
+            self._invalid_gate(gate.asset_id)
+        reproduction_model = run_repository.load_instance_file(
+            reproduction.run_id,
+            reproduction.asset_id,
+            "model",
+        )
+        expected_model_path = reproduction_model.relative_to(
+            self.repository_path
+        ).as_posix()
+        if (
+            gate_payload.get("source_instance_fingerprint")
+            != run_repository.instance_fingerprint(source)
+            or gate_payload.get("reproduction_instance_fingerprint")
+            != run_repository.instance_fingerprint(reproduction)
+            or gate_payload.get("reproduction_model_path")
+            != expected_model_path
+            or gate_payload.get("reproduction_model_fingerprint")
+            != reproduction.model_fingerprint
+            or reproduction.model_fingerprint
+            != _sha256(reproduction_model.read_bytes())
+            or gate.reproduction_metric_value
+            != reproduction.primary_metric_value
+            or gate.source_metric_value != source.primary_metric_value
+            or gate.source_metric_six_decimals
+            != gate.reproduction_metric_six_decimals
+        ):
+            self._invalid_gate(gate.asset_id)
+        return candidate, gate, {
+            "source": source,
+            "reproduction": reproduction,
+            "reproduction_model_path": reproduction_model,
+            "gate_payload": gate_payload,
+        }
+
+    def _find_candidate_review(
+        self,
+        candidate_id: str,
+    ) -> dict[str, Any] | None:
+        root = self.repository_path / SOP_APPROVAL_ROOT
+        self._validate_path(root)
+        if not root.is_dir():
+            return None
+        matches = []
+        for path in root.rglob("*.json"):
+            payload = self._load_review_payload(path)
+            if payload.get("candidate_id") == candidate_id:
+                matches.append(payload)
+        if len(matches) > 1:
+            raise WorkspaceError(
+                code="invalid_sop_review",
+                message="SOP candidate has multiple immutable review decisions.",
+                next_action="Restore the approved review history from Git.",
+            )
+        return None if not matches else matches[0]
+
+    def _load_review_payload(self, path: Path) -> dict[str, Any]:
+        payload = self._load_json(path, "invalid_sop_review")
+        canonical = dict(payload)
+        fingerprint = canonical.pop("approval_fingerprint", None)
+        if (
+            payload.get("asset_type") != "sop_review"
+            or payload.get("schema_version") != SOP_SCHEMA_VERSION
+            or payload.get("decision") not in {"approve", "reject"}
+            or fingerprint != _fingerprint(canonical)
+        ):
+            raise WorkspaceError(
+                code="invalid_sop_review",
+                message=f"SOP review record is invalid: {path.name}.",
+                next_action="Restore the immutable review record from Git.",
+            )
+        return payload
+
+    def _review_outcome(self, payload: dict[str, Any]) -> SopReviewOutcome:
+        if payload["decision"] == "reject":
+            return SopReviewOutcome(
+                decision="reject",
+                candidate_id=payload["candidate_id"],
+                gate_id=payload["gate_id"],
+                approval_id=payload["asset_id"],
+                sop_version=None,
+                formal_model=None,
+            )
+        match = re.search(r"-v([0-9]{4})$", payload["sop_version_id"])
+        if match is None:
+            raise WorkspaceError(
+                code="invalid_sop_review",
+                message="Approved SOP review has an invalid version identity.",
+                next_action="Restore the immutable review record from Git.",
+            )
+        return SopReviewOutcome(
+            decision="approve",
+            candidate_id=payload["candidate_id"],
+            gate_id=payload["gate_id"],
+            approval_id=payload["asset_id"],
+            sop_version=self.load_sop_version(
+                payload["sop_id"],
+                int(match.group(1)),
+            ),
+            formal_model=self.get_formal_model(payload["formal_model_id"]),
+        )
+
+    def _next_version(self, sop_id: str) -> int:
+        versions = self.list_sop_versions(sop_id)
+        return max((item.version for item in versions), default=0) + 1
+
+    def _load_approval(
+        self,
+        sop_id: str,
+        version_name: str,
+        approval_id: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(approval_id, str):
+            self._invalid_version(sop_id, int(version_name[1:]))
+        path = (
+            self.repository_path
+            / SOP_APPROVAL_ROOT
+            / sop_id
+            / version_name
+            / f"{approval_id}.json"
+        )
+        return self._load_review_payload(path)
+
+    def _validate_publication_capacity(
+        self,
+        encoded: dict[Path, bytes],
+        capacity: CapacityStatus,
+    ) -> None:
+        additions = 0
+        for target, raw in encoded.items():
+            self._validate_path(target)
+            if len(raw) >= capacity.max_file_bytes:
+                raise WorkspaceError(
+                    code="sop_publication_too_large",
+                    message=f"Formal SOP asset reaches the file limit: {target.name}.",
+                    next_action="Use an approved artifact storage policy before publication.",
+                )
+            if target.exists():
+                if target.is_symlink() or target.read_bytes() != raw:
+                    raise WorkspaceError(
+                        code="sop_publication_conflict",
+                        message=f"Formal SOP asset path contains different bytes: {target}.",
+                        next_action="Restore the immutable version before retrying.",
+                    )
+            else:
+                additions += len(raw)
+        used = sum(
+            path.stat().st_size
+            for path in self.repository_path.rglob("*")
+            if path.is_file()
+            and ".git" not in path.parts
+            and ".mlagent-local" not in path.parts
+        )
+        if used + additions >= capacity.max_repository_bytes:
+            raise WorkspaceError(
+                code="repository_capacity_exceeded",
+                message="Team Memory has no capacity for the approved SOP assets.",
+                next_action="Archive approved large assets before retrying.",
+            )
+
+    def _publish_exact_file(self, target: Path, raw: bytes) -> None:
+        self._validate_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_symlink() or target.read_bytes() != raw:
+                raise WorkspaceError(
+                    code="sop_publication_conflict",
+                    message=f"Formal SOP asset differs at {target}.",
+                    next_action="Restore the immutable version before retrying.",
+                )
+            return
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(raw)
+            os.replace(temporary, target)
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            raise WorkspaceError(
+                code="sop_publication_failed",
+                message="Approved SOP assets could not be published atomically.",
+                next_action="Check Team Memory permissions and retry the same review.",
+            ) from error
 
     def _collect_source(self, spec: SopCandidateSpec) -> dict[str, Any]:
         raw_manifest = self._preflight_instance(spec)
@@ -1048,6 +1759,11 @@ class SopRepository:
         self._validate_id(value, "gate_id")
         return value
 
+    def _new_approval_id(self) -> str:
+        value = self.approval_id_factory()
+        self._validate_id(value, "approval_id")
+        return value
+
     def _timestamp(self) -> str:
         value = self.clock()
         if not isinstance(value, str) or not value.strip():
@@ -1084,6 +1800,22 @@ class SopRepository:
             code="invalid_sop_reproduction_gate",
             message=f"SOP reproduction gate is invalid: {gate_id}.",
             next_action="Restore the immutable gate from Git.",
+        )
+
+    @staticmethod
+    def _invalid_version(sop_id: str, version: int) -> None:
+        raise WorkspaceError(
+            code="invalid_sop_version",
+            message=f"SOP Version is invalid: {sop_id} v{version:04d}.",
+            next_action="Restore the complete approved SOP Version from Git.",
+        )
+
+    @staticmethod
+    def _invalid_model(model_id: str) -> None:
+        raise WorkspaceError(
+            code="invalid_formal_model",
+            message=f"Formal Model is invalid: {model_id}.",
+            next_action="Restore the complete approved Formal Model from Git.",
         )
 
     @staticmethod
