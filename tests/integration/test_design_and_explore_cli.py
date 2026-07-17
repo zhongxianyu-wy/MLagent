@@ -77,6 +77,10 @@ def test_design_and_explore_record_parses_claude_plan_into_domain_command(
     assert command.risks == ("feature selection can overfit",)
     assert command.trusted_experience_ids == ("experience-approved",)
     assert command.pending_experience_ids == ("experience-pending",)
+    assert command.experience_applicability == {
+        "experience-approved": "Same Dataset and metric.",
+        "experience-pending": "Matching optimization direction.",
+    }
     assert command.candidate_code_paths == ("train.py",)
     assert json.loads(capsys.readouterr().out)["asset_id"] == "plan-event-1"
 
@@ -171,5 +175,9 @@ def plan_payload():
         "trusted_experience_ids": ["experience-approved"],
         "pending_experience_ids": ["experience-pending"],
         "excluded_pending_experience_ids": [],
+        "experience_applicability": {
+            "experience-approved": "Same Dataset and metric.",
+            "experience-pending": "Matching optimization direction.",
+        },
         "candidate_code_paths": ["train.py"],
     }

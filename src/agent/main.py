@@ -587,6 +587,9 @@ def _design_and_explore(
                     excluded_pending_experience_ids=tuple(
                         plan["excluded_pending_experience_ids"]
                     ),
+                    experience_applicability=dict(
+                        plan["experience_applicability"]
+                    ),
                     candidate_code_paths=tuple(plan["candidate_code_paths"]),
                 )
             )
@@ -652,6 +655,7 @@ def _load_exploration_plan_file(path: Path) -> dict:
         "trusted_experience_ids",
         "pending_experience_ids",
         "excluded_pending_experience_ids",
+        "experience_applicability",
         "candidate_code_paths",
     }
     if not required.issubset(payload):

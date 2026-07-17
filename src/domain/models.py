@@ -196,6 +196,8 @@ class RecordExplorationPlanCommand:
     trusted_experience_ids: tuple[str, ...] = ()
     pending_experience_ids: tuple[str, ...] = ()
     excluded_pending_experience_ids: tuple[str, ...] = ()
+    experience_applicability: dict[str, str] = field(default_factory=dict)
+    experience_citations: tuple[ExperienceCitation, ...] = ()
     candidate_code_paths: tuple[str, ...] = ()
 
 
@@ -244,6 +246,8 @@ class ExplorationPlanSnapshot:
     state: str
     created_at: str
     created_by: str
+    experience_applicability: dict[str, str] = field(default_factory=dict)
+    experience_citations: tuple[ExperienceCitation, ...] = ()
     previous_event_id: str | None = None
     asset_type: str = "exploration_plan_event"
 

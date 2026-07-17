@@ -48,6 +48,7 @@ the opportunity to inspect both plan and code in the read-only Run Status view.
   "trusted_experience_ids": [],
   "pending_experience_ids": [],
   "excluded_pending_experience_ids": [],
+  "experience_applicability": {},
   "candidate_code_paths": ["train.py"]
 }
 ```

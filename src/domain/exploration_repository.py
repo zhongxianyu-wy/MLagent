@@ -15,6 +15,7 @@ from src.domain.models import (
     CandidateCodePreview,
     CapacityStatus,
     DatasetVersionSnapshot,
+    ExperienceCitation,
     ExplorationApprovalSnapshot,
     ExplorationPlanSnapshot,
     ExplorationReviewSnapshot,
@@ -24,7 +25,7 @@ from src.domain.models import (
 )
 
 
-EXPLORATION_SCHEMA_VERSION = 2
+EXPLORATION_SCHEMA_VERSION = 3
 PLAN_ROOT = Path("raw-records/exploration-plans")
 APPROVAL_ROOT = Path("approvals/exploration-plans")
 GATE_AUDIT_ROOT = Path("approvals/training-gates")
@@ -49,6 +50,8 @@ PLAN_CONTENT_FIELDS = (
     "trusted_experience_ids",
     "pending_experience_ids",
     "excluded_pending_experience_ids",
+    "experience_applicability",
+    "experience_citations",
     "candidate_code_files",
     "code_fingerprint",
 )
@@ -155,6 +158,12 @@ class ExplorationRepository:
             "excluded_pending_experience_ids": list(
                 command.excluded_pending_experience_ids
             ),
+            "experience_applicability": dict(
+                command.experience_applicability
+            ),
+            "experience_citations": [
+                item.to_dict() for item in command.experience_citations
+            ],
             "candidate_code_files": [
                 _code_file_payload(item) for item in code_files
             ],
@@ -669,6 +678,37 @@ class ExplorationRepository:
         excluded = set(command.excluded_pending_experience_ids)
         if trusted & pending or not excluded.issubset(pending):
             ExplorationRepository._invalid_experience_references()
+        included = (
+            *command.trusted_experience_ids,
+            *(
+                item
+                for item in command.pending_experience_ids
+                if item not in excluded
+            ),
+        )
+        if set(command.experience_applicability) != set(included) or any(
+            not isinstance(reason, str) or not reason.strip()
+            for reason in command.experience_applicability.values()
+        ):
+            ExplorationRepository._invalid_experience_references()
+        citation_ids = tuple(
+            item.experience_id for item in command.experience_citations
+        )
+        if citation_ids != included:
+            ExplorationRepository._invalid_experience_references()
+        trusted_ids = set(command.trusted_experience_ids)
+        for citation in command.experience_citations:
+            expected_state = (
+                "trusted"
+                if citation.experience_id in trusted_ids
+                else "pending"
+            )
+            if (
+                citation.state != expected_state
+                or citation.why_applicable
+                != command.experience_applicability[citation.experience_id]
+            ):
+                ExplorationRepository._invalid_experience_references()
 
     def _read_code_files(
         self,
@@ -955,6 +995,60 @@ class ExplorationRepository:
             ExplorationRepository._invalid_plan(
                 "experience confidence references are inconsistent"
             )
+        included = (
+            *payload["trusted_experience_ids"],
+            *(
+                item
+                for item in payload["pending_experience_ids"]
+                if item not in excluded
+            ),
+        )
+        applicability = payload["experience_applicability"]
+        citations = payload["experience_citations"]
+        if (
+            not isinstance(applicability, dict)
+            or set(applicability) != set(included)
+            or any(
+                not isinstance(key, str)
+                or not key.strip()
+                or not isinstance(value, str)
+                or not value.strip()
+                for key, value in applicability.items()
+            )
+            or not isinstance(citations, list)
+            or len(citations) != len(included)
+        ):
+            ExplorationRepository._invalid_plan(
+                "experience usage fields are invalid"
+            )
+        try:
+            parsed_citations = tuple(
+                ExperienceCitation(**item) for item in citations
+            )
+        except (TypeError, ValueError) as error:
+            raise WorkspaceError(
+                code="invalid_exploration_plan",
+                message="Exploration plan Experience citations are invalid.",
+                next_action="Restore the append-only plan event from Git.",
+            ) from error
+        if tuple(item.experience_id for item in parsed_citations) != included:
+            ExplorationRepository._invalid_plan(
+                "experience citation order is invalid"
+            )
+        for citation in parsed_citations:
+            expected_state = (
+                "trusted"
+                if citation.experience_id in trusted
+                else "pending"
+            )
+            if (
+                citation.state != expected_state
+                or citation.why_applicable
+                != applicability[citation.experience_id]
+            ):
+                ExplorationRepository._invalid_plan(
+                    "experience citation confidence is invalid"
+                )
         for key, value in payload["resource_limits"].items():
             valid_value = (
                 isinstance(value, str)
@@ -1050,6 +1144,13 @@ class ExplorationRepository:
             pending_experience_ids=tuple(payload["pending_experience_ids"]),
             excluded_pending_experience_ids=tuple(
                 payload["excluded_pending_experience_ids"]
+            ),
+            experience_applicability=dict(
+                payload["experience_applicability"]
+            ),
+            experience_citations=tuple(
+                ExperienceCitation(**item)
+                for item in payload["experience_citations"]
             ),
             candidate_code_files=tuple(
                 CandidateCodeFile(

@@ -11,6 +11,7 @@ from src.domain.memory_repository import MemoryRepository
 from src.domain.models import (
     DatasetPreview,
     DatasetVersionSnapshot,
+    ExperienceCitation,
     ExplorationRound,
     RecordExplorationPlanCommand,
     WorkspaceError,
@@ -84,6 +85,24 @@ class PlanningWorkspace:
                 "experience-excluded",
             ),
             "excluded_pending_experience_ids": ("experience-excluded",),
+            "experience_applicability": {
+                "experience-approved": "Same Dataset and metric.",
+                "experience-pending": "Matching feature-selection direction.",
+            },
+            "experience_citations": (
+                ExperienceCitation(
+                    experience_id="experience-approved",
+                    event_id="experience-event-approved",
+                    state="trusted",
+                    why_applicable="Same Dataset and metric.",
+                ),
+                ExperienceCitation(
+                    experience_id="experience-pending",
+                    event_id="experience-event-pending",
+                    state="pending",
+                    why_applicable="Matching feature-selection direction.",
+                ),
+            ),
             "candidate_code_paths": ("train.py",),
         }
         values.update(overrides)
@@ -108,7 +127,7 @@ def test_record_plan_appends_events_without_sop_style_versions(planning_workspac
     assert second.asset_id == "plan-event-2"
     assert json.loads(
         (planning_workspace.memory_root / second.asset_path).read_text(encoding="utf-8")
-    )["schema_version"] == 2
+    )["schema_version"] == 3
     assert not hasattr(first, "version")
     assert planning_workspace.repository.current("plan-1") == second
     assert planning_workspace.repository.list_plan_events("plan-1") == (
@@ -158,6 +177,55 @@ def test_record_plan_keeps_experience_confidence_and_exclusions_separate(
         "experience-excluded",
     )
     assert plan.excluded_pending_experience_ids == ("experience-excluded",)
+    assert plan.experience_applicability == {
+        "experience-approved": "Same Dataset and metric.",
+        "experience-pending": "Matching feature-selection direction.",
+    }
+    assert tuple(
+        item.event_id for item in plan.experience_citations
+    ) == (
+        "experience-event-approved",
+        "experience-event-pending",
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"experience_applicability": {}},
+        {
+            "experience_citations": (
+                ExperienceCitation(
+                    "experience-approved",
+                    "experience-event-approved",
+                    "pending",
+                    "Same Dataset and metric.",
+                ),
+                ExperienceCitation(
+                    "experience-pending",
+                    "experience-event-pending",
+                    "pending",
+                    "Matching feature-selection direction.",
+                ),
+            )
+        },
+        {
+            "experience_applicability": {
+                "experience-approved": "Same Dataset and metric.",
+                "experience-pending": "Matching feature-selection direction.",
+                "experience-excluded": "Must not be used.",
+            }
+        },
+    ),
+)
+def test_plan_rejects_missing_misclassified_or_excluded_usage(
+    planning_workspace,
+    overrides,
+):
+    with pytest.raises(WorkspaceError) as caught:
+        planning_workspace.record(**overrides)
+
+    assert caught.value.code == "invalid_experience_references"
 
 
 def test_record_plan_uses_dataset_metric_and_fingerprints(planning_workspace):

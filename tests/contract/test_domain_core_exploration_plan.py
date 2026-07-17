@@ -99,9 +99,10 @@ class ExplorationWorkspace:
             "stop_conditions": ("target reached",),
             "risks": ("validation overfitting",),
             "resource_limits": {"max_minutes": 30},
-            "trusted_experience_ids": ("experience-approved",),
-            "pending_experience_ids": ("experience-pending",),
+            "trusted_experience_ids": (),
+            "pending_experience_ids": (),
             "excluded_pending_experience_ids": (),
+            "experience_applicability": {},
             "candidate_code_paths": ("train.py",),
         }
         values.update(overrides)

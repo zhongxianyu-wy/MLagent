@@ -11,6 +11,7 @@ from typing import Any
 from src.domain.dataset_intake import DatasetInspector
 from src.domain.dataset_repository import DatasetRepository
 from src.domain.exploration_repository import ExplorationRepository
+from src.domain.experience_repository import ExperienceRepository
 from src.domain.git_sync import GitSyncService
 from src.domain.local_index import LocalIndex
 from src.domain.memory_repository import MemoryRepository, RepositoryStatus
@@ -23,6 +24,9 @@ from src.domain.models import (
     DatasetInspection,
     DatasetVersionSnapshot,
     ExecuteExplorationCommand,
+    ExperienceCitation,
+    ExperienceSearchResult,
+    ExperienceSnapshot,
     ExplorationApprovalSnapshot,
     ExplorationPlanSnapshot,
     ExplorationReviewSnapshot,
@@ -31,6 +35,7 @@ from src.domain.models import (
     RecordExplorationPlanCommand,
     RecoverRunCommand,
     RequestRunStopCommand,
+    ReviewExperienceCommand,
     RunStatusSnapshot,
     SessionStopSyncCommand,
     SyncStatusSnapshot,
@@ -280,10 +285,14 @@ class DomainCore:
             command.dataset_id,
             command.dataset_version,
         )
+        citations = self._resolve_experience_citations(
+            repository.repository_path,
+            command,
+        )
         return self._exploration_repository(
             repository.repository_path
         ).record_plan(
-            command,
+            replace(command, experience_citations=citations),
             dataset,
             actor_id=connection.actor_id,
             capacity=repository.capacity,
@@ -302,9 +311,13 @@ class DomainCore:
             connection.repository_path,
             actor_id=connection.actor_id,
         )
-        return self._exploration_repository(
-            repository.repository_path
-        ).approve_current(
+        exploration = self._exploration_repository(repository.repository_path)
+        plan = exploration.current(command.plan_id)
+        self._require_current_experience_citations(
+            repository.repository_path,
+            plan,
+        )
+        return exploration.approve_current(
             command.plan_id,
             command.code_root,
             actor_id=connection.actor_id,
@@ -390,6 +403,10 @@ class DomainCore:
                 command.plan_id,
                 command.approval_id,
                 command.code_root,
+            )
+            self._require_current_experience_citations(
+                repository.repository_path,
+                plan,
             )
             self._require_approved_dataset_binding(dataset, plan, approval)
             authorized_at = self.clock() if self.clock is not None else _utc_now()
@@ -523,6 +540,77 @@ class DomainCore:
         )
         return self._run_repository(repository.repository_path).status(run_id)
 
+    def list_experiences(
+        self,
+        connection_path: Path,
+        states: tuple[str, ...] | None = None,
+    ) -> tuple[ExperienceSnapshot, ...]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._experience_repository(
+            repository.repository_path
+        ).list_current(states)
+
+    def get_experience_history(
+        self,
+        connection_path: Path,
+        experience_id: str,
+    ) -> tuple[ExperienceSnapshot, ...]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._experience_repository(
+            repository.repository_path
+        ).history(experience_id)
+
+    def review_experience(
+        self,
+        command: ReviewExperienceCommand,
+    ) -> ExperienceSnapshot:
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._experience_repository(
+            repository.repository_path
+        ).review(
+            command,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+    def search_experiences(
+        self,
+        connection_path: Path,
+        query: str,
+        *,
+        dataset_id: str | None = None,
+        include_pending: bool = False,
+        top_k: int = 5,
+    ) -> tuple[
+        tuple[ExperienceSearchResult, ...],
+        tuple[ExperienceSearchResult, ...],
+    ]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path,
+            actor_id=connection.actor_id,
+        )
+        return self._experience_repository(
+            repository.repository_path
+        ).search(
+            query,
+            dataset_id=dataset_id,
+            include_pending=include_pending,
+            top_k=top_k,
+        )
+
     def list_run_statuses(
         self,
         connection_path: Path,
@@ -639,6 +727,90 @@ class DomainCore:
             instance_id_factory=self.training_instance_id_factory,
             clock=self.clock,
         )
+
+    def _experience_repository(
+        self,
+        repository_path: Path,
+    ) -> ExperienceRepository:
+        return ExperienceRepository(
+            repository_path,
+            clock=self.clock,
+        )
+
+    def _resolve_experience_citations(
+        self,
+        repository_path: Path,
+        command: RecordExplorationPlanCommand,
+    ) -> tuple[ExperienceCitation, ...]:
+        excluded = set(command.excluded_pending_experience_ids)
+        included = (
+            *command.trusted_experience_ids,
+            *(
+                experience_id
+                for experience_id in command.pending_experience_ids
+                if experience_id not in excluded
+            ),
+        )
+        if set(command.experience_applicability) != set(included):
+            raise WorkspaceError(
+                code="invalid_experience_references",
+                message="Every included Experience requires one applicability reason.",
+                next_action="Explain why each included Trusted or Pending Experience applies.",
+            )
+        repository = self._experience_repository(repository_path)
+        trusted = set(command.trusted_experience_ids)
+        citations = []
+        for experience_id in included:
+            experience = repository.current(experience_id)
+            expected_state = (
+                "trusted" if experience_id in trusted else "pending"
+            )
+            if experience.state != expected_state:
+                raise WorkspaceError(
+                    code="experience_state_mismatch",
+                    message=(
+                        f"Experience {experience_id} is {experience.state}, "
+                        f"not {expected_state}."
+                    ),
+                    next_action="Refresh Experience retrieval and record the plan again.",
+                )
+            reason = command.experience_applicability[experience_id]
+            if not isinstance(reason, str) or not reason.strip():
+                raise WorkspaceError(
+                    code="invalid_experience_references",
+                    message="Experience applicability reasons must be non-empty.",
+                    next_action="Explain why each included Experience applies.",
+                )
+            citations.append(
+                ExperienceCitation(
+                    experience_id=experience.asset_id,
+                    event_id=experience.event_id,
+                    state=experience.state,
+                    why_applicable=reason.strip(),
+                )
+            )
+        return tuple(citations)
+
+    def _require_current_experience_citations(
+        self,
+        repository_path: Path,
+        plan: ExplorationPlanSnapshot,
+    ) -> None:
+        repository = self._experience_repository(repository_path)
+        for citation in plan.experience_citations:
+            current = repository.current(citation.experience_id)
+            if (
+                current.event_id != citation.event_id
+                or current.state != citation.state
+            ):
+                raise WorkspaceError(
+                    code="experience_reference_stale",
+                    message=(
+                        f"Experience {citation.experience_id} changed after "
+                        "the exploration plan was recorded."
+                    ),
+                    next_action="Refresh guidance, record the plan again, and review it.",
+                )
 
     @staticmethod
     def _select_training_entrypoint(

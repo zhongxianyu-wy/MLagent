@@ -92,12 +92,10 @@ def run_status_workspace(tmp_path, monkeypatch):
             stop_conditions=("target reached", "round budget exhausted"),
             risks=("validation overfitting",),
             resource_limits={"max_minutes": 30, "max_parallel_jobs": 1},
-            trusted_experience_ids=("experience-approved",),
-            pending_experience_ids=(
-                "experience-pending",
-                "experience-excluded",
-            ),
-            excluded_pending_experience_ids=("experience-excluded",),
+            trusted_experience_ids=(),
+            pending_experience_ids=(),
+            excluded_pending_experience_ids=(),
+            experience_applicability={},
             candidate_code_paths=("train.py",),
         )
     )

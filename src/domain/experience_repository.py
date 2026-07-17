@@ -16,6 +16,7 @@ from src.domain.models import (
     CapacityStatus,
     ExperienceContent,
     ExperienceEvidence,
+    ExperienceSearchResult,
     ExperienceSnapshot,
     ReviewExperienceCommand,
     SessionExperienceOutcome,
@@ -317,6 +318,96 @@ class ExperienceRepository:
             )
             self._write_new(relative, payload, capacity)
             return self._snapshot(payload, relative)
+
+    def search(
+        self,
+        query: str,
+        *,
+        dataset_id: str | None = None,
+        include_pending: bool = False,
+        top_k: int = 5,
+    ) -> tuple[
+        tuple[ExperienceSearchResult, ...],
+        tuple[ExperienceSearchResult, ...],
+    ]:
+        if not isinstance(query, str) or not query.strip():
+            raise WorkspaceError(
+                code="invalid_experience_query",
+                message="Experience retrieval requires a non-empty query.",
+                next_action="Describe the Dataset, metric, or optimization direction.",
+            )
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise WorkspaceError(
+                code="invalid_experience_query",
+                message="Experience retrieval top_k must be positive.",
+                next_action="Use a positive result limit.",
+            )
+        if dataset_id is not None and (
+            not isinstance(dataset_id, str) or not dataset_id.strip()
+        ):
+            raise WorkspaceError(
+                code="invalid_experience_query",
+                message="Experience retrieval Dataset ID is invalid.",
+                next_action="Use a confirmed Dataset ID or omit the filter.",
+            )
+        query_terms = _terms(query)
+        groups: dict[str, list[ExperienceSearchResult]] = {
+            "trusted": [],
+            "pending": [],
+        }
+        states = ("trusted", "pending") if include_pending else ("trusted",)
+        for experience in self.list_current(states):
+            dataset_evidence = next(
+                item
+                for item in experience.evidence
+                if item.role == "dataset"
+            )
+            dataset_matches = (
+                dataset_id is None
+                or dataset_id in dataset_evidence.asset_id
+                or dataset_id in dataset_evidence.asset_path
+            )
+            if not dataset_matches:
+                continue
+            searchable = " ".join(
+                (
+                    experience.content.conclusion,
+                    experience.content.applicability,
+                    experience.content.recommended_action,
+                    experience.content.failure_boundary,
+                    experience.content.risk,
+                    experience.source_kind.replace("_", " "),
+                    dataset_evidence.asset_id,
+                )
+            )
+            matched = sorted(query_terms & _terms(searchable))
+            if not matched and dataset_id is None:
+                continue
+            score = len(matched) + (3 if dataset_id is not None else 0)
+            reasons = []
+            if dataset_id is not None:
+                reasons.append(f"Dataset {dataset_id} matches direct evidence")
+            if matched:
+                reasons.append("matched " + ", ".join(matched[:6]))
+            result = ExperienceSearchResult(
+                experience=experience,
+                why_applicable="; ".join(reasons) + ".",
+                score=score,
+            )
+            groups[experience.state].append(result)
+        for values in groups.values():
+            values.sort(
+                key=lambda item: (
+                    item.score,
+                    item.experience.created_at,
+                    item.experience.asset_id,
+                ),
+                reverse=True,
+            )
+        return (
+            tuple(groups["trusted"][:top_k]),
+            tuple(groups["pending"][:top_k]),
+        )
 
     def pending_count(self) -> int:
         return len(self.list_current(("pending",)))
@@ -831,3 +922,11 @@ class ExperienceRepository:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _terms(value: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[a-z0-9_]+", value.lower())
+        if len(term) > 1
+    }

@@ -610,6 +610,66 @@ def test_concurrent_review_heads_fail_closed(experience_workspace):
         workspace.repository.current(pending.asset_id)
 
 
+def test_search_partitions_trusted_and_optional_low_confidence_guidance(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    pending = create_pending(
+        workspace,
+        "session-search-pending",
+        "instance-search-pending",
+    )
+    trusted_pending = create_pending(
+        workspace,
+        "session-search-trusted",
+        "instance-search-trusted",
+        parent_id="instance-search-pending",
+        parent_metric=0.8,
+        metric=0.9,
+    )
+    trusted = approve(workspace, trusted_pending)
+    rejected_pending = create_pending(
+        workspace,
+        "session-search-rejected",
+        "instance-search-rejected",
+        parent_id="instance-search-trusted",
+        parent_metric=0.9,
+        metric=0.95,
+    )
+    workspace.repository.review(
+        ReviewExperienceCommand(
+            Path("unused.json"),
+            rejected_pending.asset_id,
+            "reject",
+            rejected_pending.content,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+    trusted_results, pending_results = workspace.repository.search(
+        "feature filtering roc_auc",
+        dataset_id="dataset-1",
+        include_pending=True,
+    )
+
+    assert {item.experience.asset_id for item in trusted_results} == {
+        trusted.asset_id
+    }
+    assert {item.experience.asset_id for item in pending_results} == {
+        pending.asset_id
+    }
+    assert all(
+        item.why_applicable
+        for item in (*trusted_results, *pending_results)
+    )
+    without_pending = workspace.repository.search(
+        "feature filtering roc_auc",
+        include_pending=False,
+    )
+    assert without_pending[1] == ()
+
+
 def create_pending(
     workspace,
     session_id,
