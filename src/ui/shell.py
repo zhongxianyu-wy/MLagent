@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from src.domain.models import (
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExperienceSnapshot,
     ExplorationReviewSnapshot,
     RunStatusSnapshot,
     SyncStatusSnapshot,
@@ -57,6 +58,7 @@ class ShellState:
     inspection: DatasetInspection | None
     exploration_review: ExplorationReviewSnapshot | None
     run_statuses: tuple[RunStatusSnapshot, ...]
+    experiences: tuple[ExperienceSnapshot, ...]
 
 
 def build_shell_state(
@@ -65,6 +67,7 @@ def build_shell_state(
     inspection: DatasetInspection | None = None,
     exploration_review: ExplorationReviewSnapshot | None = None,
     run_statuses: tuple[RunStatusSnapshot, ...] = (),
+    experiences: tuple[ExperienceSnapshot, ...] = (),
 ) -> ShellState:
     git_status = sync_display(snapshot.sync.state)
     module_status = {module: "Not started" for module in NAVIGATION}
@@ -91,6 +94,13 @@ def build_shell_state(
             "recovery_required": "Pending confirmation",
         }.get(latest_run.state, "Failed")
         module_status["Run Status"] = run_status
+    experience_states = {experience.state for experience in experiences}
+    if experience_states & {"pending", "conflict"}:
+        module_status["Experience Review"] = "Pending review"
+    elif "trusted" in experience_states:
+        module_status["Experience Review"] = "Approved"
+    elif experience_states:
+        module_status["Experience Review"] = "Rejected"
     return ShellState(
         navigation=NAVIGATION,
         context={
@@ -121,6 +131,7 @@ def build_shell_state(
         inspection=inspection,
         exploration_review=exploration_review,
         run_statuses=run_statuses,
+        experiences=experiences,
     )
 
 

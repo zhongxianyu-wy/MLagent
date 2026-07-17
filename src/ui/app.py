@@ -18,10 +18,13 @@ from src.domain.models import (
     AuthorizeTrainingCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
+    ExperienceContent,
+    ExperienceSnapshot,
     ExplorationReviewSnapshot,
     InspectDatasetCommand,
     RecoverRunCommand,
     RequestRunStopCommand,
+    ReviewExperienceCommand,
     RunStatusSnapshot,
     WorkspaceError,
 )
@@ -54,6 +57,7 @@ def main() -> None:
             code_root,
         )
         run_statuses = core.list_run_statuses(connection_path)
+        experiences = core.list_experiences(connection_path)
     except WorkspaceError as error:
         st.error(error.message)
         st.caption(error.next_action)
@@ -66,6 +70,7 @@ def main() -> None:
         inspection,
         exploration_review,
         run_statuses,
+        experiences,
     )
     with st.sidebar:
         st.title("MLagent")
@@ -106,6 +111,12 @@ def main() -> None:
             code_root,
             shell.exploration_review,
             shell.run_statuses,
+        )
+    elif selected_module == "Experience Review":
+        _render_experience_review(
+            core,
+            connection_path,
+            shell.experiences,
         )
 
     for issue in shell.issues:
@@ -431,6 +442,312 @@ def _render_run_status(
                     f"Authorized for Issue #5 execution: "
                     f"{authorization.approval_id}"
                 )
+
+
+def _render_experience_review(
+    core: DomainCore,
+    connection_path: Path,
+    experiences: tuple[ExperienceSnapshot, ...],
+) -> None:
+    state_groups = (
+        ("pending", "Pending"),
+        ("trusted", "Trusted"),
+        ("rejected", "Rejected"),
+        ("conflict", "Conflict"),
+        ("superseded", "Superseded"),
+    )
+    grouped = {
+        state: tuple(item for item in experiences if item.state == state)
+        for state, _ in state_groups
+    }
+    tabs = st.tabs(
+        [
+            f"{label} ({len(grouped[state])})"
+            for state, label in state_groups
+        ]
+    )
+    for tab, (state, label) in zip(tabs, state_groups):
+        with tab:
+            items = grouped[state]
+            if not items:
+                st.info(f"No {label.lower()} Experience")
+                continue
+            labels = {
+                item.asset_id: (
+                    f"{item.asset_id} · {item.content.conclusion[:72]}"
+                )
+                for item in items
+            }
+            selected_id = st.selectbox(
+                f"{label} Experience",
+                tuple(labels),
+                format_func=lambda experience_id: labels[experience_id],
+                key=f"experience_select_{state}",
+            )
+            selected = next(
+                item for item in items if item.asset_id == selected_id
+            )
+            _render_experience_detail(
+                core,
+                connection_path,
+                selected,
+                experiences,
+            )
+
+
+def _render_experience_detail(
+    core: DomainCore,
+    connection_path: Path,
+    experience: ExperienceSnapshot,
+    all_experiences: tuple[ExperienceSnapshot, ...],
+) -> None:
+    summary_columns = st.columns(4)
+    summary = (
+        ("State", _state_label(experience.state)),
+        ("Confidence", f"{experience.content.confidence:.2f}"),
+        ("Source", _state_label(experience.source_kind)),
+        ("Current event", experience.event_id),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.caption(
+        f"Extracted in {experience.extraction_session_id} · "
+        f"created {experience.created_at} by {experience.created_by}"
+    )
+
+    if experience.state in {"pending", "conflict"}:
+        _render_experience_review_form(
+            core,
+            connection_path,
+            experience,
+            all_experiences,
+        )
+    else:
+        _render_experience_content(experience.content)
+        if experience.state == "trusted":
+            _render_supersede_form(
+                core,
+                connection_path,
+                experience,
+                all_experiences,
+            )
+
+    st.markdown("**Evidence**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Role": item.role,
+                    "Asset": item.asset_id,
+                    "Path": item.asset_path,
+                    "SHA-256": item.sha256,
+                }
+                for item in experience.evidence
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.markdown("**Immutable history**")
+    try:
+        history = core.get_experience_history(
+            connection_path,
+            experience.asset_id,
+        )
+    except WorkspaceError as error:
+        st.error(f"{error.code}: {error.message}")
+        st.caption(error.next_action)
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Event": item.event_id,
+                    "State": _state_label(item.state),
+                    "Decision": item.decision or "Extracted",
+                    "Reviewer": item.reviewed_by or item.created_by,
+                    "Timestamp": item.reviewed_at or item.created_at,
+                    "Relation": (
+                        f"{item.relation_type}: "
+                        f"{item.related_experience_id}"
+                        if item.relation_type is not None
+                        else "None"
+                    ),
+                }
+                for item in history
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _render_experience_review_form(
+    core: DomainCore,
+    connection_path: Path,
+    experience: ExperienceSnapshot,
+    all_experiences: tuple[ExperienceSnapshot, ...],
+) -> None:
+    content = experience.content
+    with st.form(f"review_experience_{experience.asset_id}"):
+        conclusion = st.text_area(
+            "Conclusion",
+            content.conclusion,
+            key=f"conclusion_{experience.event_id}",
+        )
+        applicability = st.text_area(
+            "Applicability",
+            content.applicability,
+            key=f"applicability_{experience.event_id}",
+        )
+        recommended_action = st.text_area(
+            "Recommended action",
+            content.recommended_action,
+            key=f"recommended_action_{experience.event_id}",
+        )
+        failure_boundary = st.text_area(
+            "Failure boundary",
+            content.failure_boundary,
+            key=f"failure_boundary_{experience.event_id}",
+        )
+        risk = st.text_area(
+            "Risk",
+            content.risk,
+            key=f"risk_{experience.event_id}",
+        )
+        confidence = st.slider(
+            "Confidence",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(content.confidence),
+            step=0.05,
+            key=f"confidence_{experience.event_id}",
+        )
+        relation_candidates = tuple(
+            item.asset_id
+            for item in all_experiences
+            if item.asset_id != experience.asset_id
+            and item.state not in {"rejected", "superseded"}
+        )
+        conflict_target = st.selectbox(
+            "Conflicts with",
+            relation_candidates,
+            index=None,
+            placeholder="Select related Experience",
+            disabled=not relation_candidates,
+            key=f"conflict_target_{experience.event_id}",
+        )
+        action_columns = st.columns(3)
+        with action_columns[0]:
+            approve = st.form_submit_button("Approve", type="primary")
+        with action_columns[1]:
+            reject = st.form_submit_button("Reject")
+        with action_columns[2]:
+            conflict = st.form_submit_button(
+                "Mark conflict",
+                disabled=(
+                    experience.state != "pending"
+                    or conflict_target is None
+                ),
+            )
+    decision = (
+        "approve"
+        if approve
+        else "reject"
+        if reject
+        else "conflict"
+        if conflict
+        else None
+    )
+    if decision is None:
+        return
+    edited = ExperienceContent(
+        conclusion=conclusion,
+        applicability=applicability,
+        recommended_action=recommended_action,
+        failure_boundary=failure_boundary,
+        risk=risk,
+        confidence=confidence,
+    )
+    _submit_experience_review(
+        core,
+        ReviewExperienceCommand(
+            connection_path=connection_path,
+            experience_id=experience.asset_id,
+            decision=decision,
+            content=edited,
+            related_experience_id=(
+                conflict_target if decision == "conflict" else None
+            ),
+        ),
+    )
+
+
+def _render_experience_content(content: ExperienceContent) -> None:
+    rows = (
+        ("Conclusion", content.conclusion),
+        ("Applicability", content.applicability),
+        ("Recommended action", content.recommended_action),
+        ("Failure boundary", content.failure_boundary),
+        ("Risk", content.risk),
+    )
+    for label, value in rows:
+        st.markdown(f"**{label}**")
+        st.write(value)
+
+
+def _render_supersede_form(
+    core: DomainCore,
+    connection_path: Path,
+    experience: ExperienceSnapshot,
+    all_experiences: tuple[ExperienceSnapshot, ...],
+) -> None:
+    replacements = tuple(
+        item.asset_id
+        for item in all_experiences
+        if item.asset_id != experience.asset_id and item.state == "trusted"
+    )
+    with st.form(f"supersede_experience_{experience.asset_id}"):
+        replacement = st.selectbox(
+            "Trusted replacement",
+            replacements,
+            index=None,
+            placeholder="Select replacement Experience",
+            disabled=not replacements,
+            key=f"replacement_{experience.event_id}",
+        )
+        supersede = st.form_submit_button(
+            "Supersede",
+            disabled=replacement is None,
+        )
+    if supersede:
+        _submit_experience_review(
+            core,
+            ReviewExperienceCommand(
+                connection_path=connection_path,
+                experience_id=experience.asset_id,
+                decision="supersede",
+                content=experience.content,
+                related_experience_id=replacement,
+            ),
+        )
+
+
+def _submit_experience_review(
+    core: DomainCore,
+    command: ReviewExperienceCommand,
+) -> None:
+    try:
+        core.review_experience(command)
+    except (ValueError, WorkspaceError) as error:
+        if isinstance(error, WorkspaceError):
+            st.error(f"{error.code}: {error.message}")
+            st.caption(error.next_action)
+        else:
+            st.error(str(error))
+    else:
+        st.rerun()
 
 
 @st.fragment(run_every=2.0)

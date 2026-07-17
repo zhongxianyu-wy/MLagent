@@ -8,6 +8,9 @@ from src.domain.models import (
     DatasetInspection,
     DatasetPreview,
     DatasetVersionSnapshot,
+    ExperienceContent,
+    ExperienceEvidence,
+    ExperienceSnapshot,
     ExplorationPlanSnapshot,
     ExplorationReviewSnapshot,
     ExplorationRound,
@@ -267,6 +270,31 @@ def test_shell_uses_exploration_review_in_run_context_and_module_status():
     assert shell.exploration_review == review
 
 
+def test_shell_projects_experience_review_state_and_items():
+    pending = experience_snapshot("experience-pending", "pending")
+    trusted = experience_snapshot("experience-trusted", "trusted")
+
+    shell = build_shell_state(
+        workspace_snapshot(),
+        experiences=(trusted, pending),
+    )
+
+    assert shell.module_status["Experience Review"] == "Pending review"
+    assert shell.experiences == (trusted, pending)
+
+    approved = build_shell_state(
+        workspace_snapshot(),
+        experiences=(trusted,),
+    )
+    assert approved.module_status["Experience Review"] == "Approved"
+
+    rejected = build_shell_state(
+        workspace_snapshot(),
+        experiences=(experience_snapshot("experience-rejected", "rejected"),),
+    )
+    assert rejected.module_status["Experience Review"] == "Rejected"
+
+
 def exploration_review(state: str) -> ExplorationReviewSnapshot:
     plan = ExplorationPlanSnapshot(
         asset_id="plan-event-1",
@@ -307,5 +335,50 @@ def exploration_review(state: str) -> ExplorationReviewSnapshot:
                 current_sha256="sha",
                 state="current",
             ),
+        ),
+    )
+
+
+def experience_snapshot(
+    experience_id: str,
+    state: str,
+) -> ExperienceSnapshot:
+    pending = state == "pending"
+    evidence = tuple(
+        ExperienceEvidence(
+            role=role,
+            asset_id=f"{role}-1",
+            asset_path=f"{role}s/evidence.json",
+            sha256="a" * 64,
+        )
+        for role in ("dataset", "run", "training_instance", "raw_record")
+    )
+    return ExperienceSnapshot(
+        asset_id=experience_id,
+        asset_path=f"experiences/{experience_id}/event.json",
+        event_id=f"{experience_id}-event",
+        previous_event_id=None if pending else f"{experience_id}-pending",
+        state=state,
+        content=ExperienceContent(
+            conclusion="Feature filtering improved roc_auc.",
+            applicability="Same Dataset Version.",
+            recommended_action="Retest feature filtering.",
+            failure_boundary="One frozen split.",
+            risk="May not transfer.",
+            confidence=0.8,
+        ),
+        evidence=evidence,
+        extraction_session_id="session-1",
+        source_kind="metric_improvement",
+        relation_type=None,
+        related_experience_id=None,
+        created_at="2026-07-17T00:00:00Z",
+        created_by="agent",
+        reviewed_at=None if pending else "2026-07-17T00:01:00Z",
+        reviewed_by=None if pending else "alice",
+        decision=(
+            None
+            if pending
+            else {"trusted": "approve", "rejected": "reject"}[state]
         ),
     )
