@@ -2,6 +2,21 @@
 
 本项目按语义版本记录产品基线与实现变化。
 
+## [Unreleased] - Stage 1 engineering complete
+
+### 核心闭环
+
+- 完成 Team Memory、Dataset Version、Exploration Plan、Training Instance 和增量 Git 同步。
+- 完成 Experience 的会话提取、人工审核、冲突/替代和后续探索引用。
+- 完成指定训练实例到 SOP Candidate、独立复现门、人工批准、不可变 SOP Version 和 Formal Model。
+- 完成 Dataset Overview、Run Status、Experience Review 和 SOP Overview 的核心 UI 交互。
+
+### 验证与交接
+
+- Issue #2 至 #8 已推送并进入 `ready-for-human`，尚未作为完整 MVP 发布。
+- 已验证基线包含 613 个通过测试以及桌面端、移动端真实浏览器验收。
+- 新增 `HANDOFF.md` 和 Stage 2 路线图，明确 Issue #9 至 #16 的依赖、交付步骤和完成门槛。
+
 ## [0.4.0] - 2026-07-14
 
 ### 产品与设计

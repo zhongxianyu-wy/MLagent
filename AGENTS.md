@@ -17,13 +17,18 @@ The target user is a bioinformatics or computational biology researcher who want
 
 ## Project Status
 
-v0.4 is the approved product and architecture baseline. Prototype code exists; new PRD requirements are
-not implemented until their acceptance tests pass.
+v0.4 is the approved product and architecture baseline. Stage 1 (GitHub Issues #2-#8) is implemented on
+`feat/issue-8-sop-promotion` and awaits human acceptance. Issues #9-#16 remain the Stage 2 roadmap; the
+full MVP is not complete. Read `HANDOFF.md` before starting or resuming implementation.
+
+The repository root worktree may remain on the older `docs/v0.4-matt-workflow` branch. New feature work
+must branch from the latest delivered implementation branch identified in `HANDOFF.md`, not from that
+documentation-only baseline.
 
 ## Architecture Notes
 
-Read `CONTEXT.md`, relevant ADRs under `docs/adr/`, the v0.4 PRD, and the v0.4 design decisions before
-implementation. Older specs and root plans are historical input.
+Read `HANDOFF.md`, `CONTEXT.md`, relevant ADRs under `docs/adr/`, the v0.4 PRD, and the v0.4 design
+decisions before implementation. Older specs and root plans are historical input.
 
 - **Claude Code plugin** — workflow orchestration through Skills and Hooks.
 - **Domain core** — deterministic data, training, memory, SOP, model, and Git services.
