@@ -22,6 +22,7 @@ from src.domain.models import (
     CompleteSessionCommand,
     ConfirmedDatasetReference,
     ConfirmDatasetCommand,
+    CreateSopCandidateCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
     ExecuteExplorationCommand,
@@ -35,11 +36,18 @@ from src.domain.models import (
     InspectDatasetCommand,
     RecordExplorationPlanCommand,
     RecoverRunCommand,
+    ReproduceSopCandidateCommand,
     RequestRunStopCommand,
     ReviewExperienceCommand,
+    ReviewSopCandidateCommand,
     RunStatusSnapshot,
     SessionStopSyncCommand,
     SessionExperienceOutcome,
+    SopCandidateSnapshot,
+    SopReproductionGateSnapshot,
+    SopReviewOutcome,
+    SopVersionSnapshot,
+    FormalModelSnapshot,
     SyncStatusSnapshot,
     TrainingAuthorization,
     WorkspaceConnection,
@@ -48,6 +56,12 @@ from src.domain.models import (
 )
 from src.domain.run_execution import TrainingRunCoordinator
 from src.domain.run_repository import RunRepository
+from src.domain.sop_promotion import SopPromotionCoordinator
+from src.domain.sop_repository import (
+    SopCandidateSpec,
+    SopRepository,
+    SopReviewSpec,
+)
 from src.training.executor import SubprocessTrainingExecutor
 
 
@@ -64,6 +78,13 @@ class DomainCore:
         training_instance_id_factory: Callable[[], str] | None = None,
         training_executor_factory: Callable[[], SubprocessTrainingExecutor]
         | None = None,
+        sop_candidate_id_factory: Callable[[], str] | None = None,
+        sop_gate_id_factory: Callable[[], str] | None = None,
+        sop_approval_id_factory: Callable[[], str] | None = None,
+        sop_reproduction_run_id_factory: Callable[[], str] | None = None,
+        sop_reproduction_event_id_factory: Callable[[], str] | None = None,
+        sop_reproduction_instance_id_factory: Callable[[], str] | None = None,
+        sop_training_executor_factory: Callable[[], Any] | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
         self.dataset_id_factory = dataset_id_factory
@@ -74,6 +95,20 @@ class DomainCore:
         self.run_event_id_factory = run_event_id_factory
         self.training_instance_id_factory = training_instance_id_factory
         self.training_executor_factory = training_executor_factory
+        self.sop_candidate_id_factory = sop_candidate_id_factory
+        self.sop_gate_id_factory = sop_gate_id_factory
+        self.sop_approval_id_factory = sop_approval_id_factory
+        self.sop_reproduction_run_id_factory = (
+            sop_reproduction_run_id_factory
+            or (lambda: f"sop-reproduction-{uuid.uuid4()}")
+        )
+        self.sop_reproduction_event_id_factory = (
+            sop_reproduction_event_id_factory
+        )
+        self.sop_reproduction_instance_id_factory = (
+            sop_reproduction_instance_id_factory
+        )
+        self.sop_training_executor_factory = sop_training_executor_factory
         self.clock = clock
         self.memory_repository = MemoryRepository(
             id_factory=id_factory,
@@ -584,6 +619,118 @@ class DomainCore:
             human_marked_rounds=command.human_marked_rounds,
         )
 
+    def create_sop_candidate(
+        self,
+        command: CreateSopCandidateCommand,
+    ) -> SopCandidateSnapshot:
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        candidate = self._sop_repository(
+            repository.repository_path
+        ).create_candidate(
+            SopCandidateSpec(
+                sop_id=command.sop_id,
+                name=command.name,
+                source_run_id=command.source_run_id,
+                source_instance_id=command.source_instance_id,
+                strategy_summary=command.strategy_summary,
+                optimization_background=command.optimization_background,
+                steps=command.steps,
+                change_summary=command.change_summary,
+            ),
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        LocalIndex(repository.repository_path).rebuild()
+        return candidate
+
+    def reproduce_sop_candidate(
+        self,
+        command: ReproduceSopCandidateCommand,
+    ) -> SopReproductionGateSnapshot:
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        sops = self._sop_repository(repository.repository_path)
+        candidate = sops.validate_candidate_source(
+            command.candidate_id,
+            command.expected_candidate_fingerprint,
+        )
+        executor = (
+            self.sop_training_executor_factory()
+            if self.sop_training_executor_factory is not None
+            else SubprocessTrainingExecutor()
+        )
+        gate = SopPromotionCoordinator(
+            sop_repository=sops,
+            run_repository=self._sop_run_repository(
+                repository.repository_path
+            ),
+            executor=executor,
+            capacity=repository.capacity,
+            actor_id=connection.actor_id,
+            reproduction_run_id_factory=(
+                self.sop_reproduction_run_id_factory
+            ),
+            clock=self.clock,
+        ).reproduce(candidate)
+        LocalIndex(repository.repository_path).rebuild()
+        return gate
+
+    def review_sop_candidate(
+        self,
+        command: ReviewSopCandidateCommand,
+    ) -> SopReviewOutcome:
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        outcome = self._sop_repository(
+            repository.repository_path
+        ).review_candidate(
+            SopReviewSpec(
+                candidate_id=command.candidate_id,
+                expected_candidate_fingerprint=(
+                    command.expected_candidate_fingerprint
+                ),
+                expected_gate_fingerprint=command.expected_gate_fingerprint,
+                decision=command.decision,
+            ),
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        LocalIndex(repository.repository_path).rebuild()
+        return outcome
+
+    def list_sop_candidates(
+        self,
+        connection_path: Path,
+    ) -> tuple[SopCandidateSnapshot, ...]:
+        _, repository = self._open_connected_repository(connection_path)
+        return self._sop_repository(
+            repository.repository_path
+        ).list_candidates()
+
+    def list_sop_versions(
+        self,
+        connection_path: Path,
+        sop_id: str | None = None,
+    ) -> tuple[SopVersionSnapshot, ...]:
+        _, repository = self._open_connected_repository(connection_path)
+        return self._sop_repository(
+            repository.repository_path
+        ).list_sop_versions(sop_id)
+
+    def get_formal_model(
+        self,
+        connection_path: Path,
+        model_id: str,
+    ) -> FormalModelSnapshot:
+        _, repository = self._open_connected_repository(connection_path)
+        return self._sop_repository(
+            repository.repository_path
+        ).get_formal_model(model_id)
+
     def get_run_status(
         self,
         connection_path: Path,
@@ -781,6 +928,23 @@ class DomainCore:
             repository_path,
             event_id_factory=self.run_event_id_factory,
             instance_id_factory=self.training_instance_id_factory,
+            clock=self.clock,
+        )
+
+    def _sop_run_repository(self, repository_path: Path) -> RunRepository:
+        return RunRepository(
+            repository_path,
+            event_id_factory=self.sop_reproduction_event_id_factory,
+            instance_id_factory=self.sop_reproduction_instance_id_factory,
+            clock=self.clock,
+        )
+
+    def _sop_repository(self, repository_path: Path) -> SopRepository:
+        return SopRepository(
+            repository_path,
+            candidate_id_factory=self.sop_candidate_id_factory,
+            gate_id_factory=self.sop_gate_id_factory,
+            approval_id_factory=self.sop_approval_id_factory,
             clock=self.clock,
         )
 
