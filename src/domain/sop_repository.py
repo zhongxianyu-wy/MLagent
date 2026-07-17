@@ -61,6 +61,11 @@ class SopCandidateSpec:
             value = getattr(self, field_name)
             if not isinstance(value, str) or SAFE_ID_PATTERN.fullmatch(value) is None:
                 raise ValueError(f"{field_name} must be a safe stable ID")
+        if len(self.sop_id) > 88:
+            raise ValueError(
+                "sop_id must be at most 88 characters so versioned "
+                "asset IDs remain valid"
+            )
         for field_name in (
             "name",
             "strategy_summary",
@@ -592,20 +597,32 @@ class SopRepository:
         capacity: CapacityStatus,
     ) -> SopReviewOutcome:
         self._validate_actor(actor_id)
-        if actor_id not in load_authorized_reviewers(self.repository_path):
-            raise WorkspaceError(
-                code="unauthorized_sop_reviewer",
-                message=f"Team member is not authorized to review SOPs: {actor_id}.",
-                next_action="Use an identity listed in approvals/reviewer-policy.json.",
-            )
-        candidate, gate, chain = self._validated_review_chain(spec)
-        if gate.outcome != "passed":
-            raise WorkspaceError(
-                code="sop_gate_not_passed",
-                message=f"SOP reproduction gate did not pass: {gate.outcome}.",
-                next_action="Create a new candidate and complete an exact independent reproduction.",
-            )
         with self._lock():
+            if actor_id not in load_authorized_reviewers(self.repository_path):
+                raise WorkspaceError(
+                    code="unauthorized_sop_reviewer",
+                    message=(
+                        "Team member is not authorized to review SOPs: "
+                        f"{actor_id}."
+                    ),
+                    next_action=(
+                        "Use an identity listed in "
+                        "approvals/reviewer-policy.json."
+                    ),
+                )
+            candidate, gate, chain = self._validated_review_chain(spec)
+            if gate.outcome != "passed":
+                raise WorkspaceError(
+                    code="sop_gate_not_passed",
+                    message=(
+                        "SOP reproduction gate did not pass: "
+                        f"{gate.outcome}."
+                    ),
+                    next_action=(
+                        "Create a new candidate and complete an exact "
+                        "independent reproduction."
+                    ),
+                )
             existing = self._find_candidate_review(candidate.asset_id)
             if existing is not None:
                 if existing["decision"] != spec.decision:
@@ -615,8 +632,8 @@ class SopRepository:
                         next_action="Keep the immutable decision or create a new candidate.",
                     )
                 return self._review_outcome(existing)
-            approval_id = self._new_approval_id()
             if spec.decision == "reject":
+                approval_id = self._new_approval_id()
                 relative = (
                     SOP_APPROVAL_ROOT
                     / candidate.sop_id
@@ -659,6 +676,8 @@ class SopRepository:
             version_name = f"v{version:04d}"
             sop_version_id = f"{candidate.sop_id}-{version_name}"
             formal_model_id = f"model-{candidate.sop_id}-{version_name}"
+            self._validate_id(sop_version_id, "sop_version_id")
+            self._validate_id(formal_model_id, "formal_model_id")
             sop_relative = (
                 Path("sops")
                 / candidate.sop_id
@@ -669,13 +688,16 @@ class SopRepository:
             model_manifest_relative = (
                 FORMAL_MODEL_ROOT / formal_model_id / "manifest.json"
             )
+            approval_id, created_at = self._publication_identity(
+                self.repository_path / model_manifest_relative,
+                self.repository_path / sop_relative,
+            )
             approval_relative = (
                 SOP_APPROVAL_ROOT
                 / candidate.sop_id
                 / version_name
                 / f"{approval_id}.json"
             )
-            created_at = self._timestamp()
             model_bytes = chain["reproduction_model_path"].read_bytes()
             model_fingerprint = _sha256(model_bytes)
             model_manifest: dict[str, Any] = {
@@ -876,11 +898,31 @@ class SopRepository:
             self.repository_path / model.asset_path,
             "invalid_formal_model",
         )
-        candidate = self.load_candidate(payload.get("candidate_id"))
-        gate = self.load_gate(
-            payload.get("gate_id"),
-            candidate.asset_id,
-        )
+        try:
+            candidate, gate, _ = self._validated_review_chain(
+                SopReviewSpec(
+                    candidate_id=payload.get("candidate_id"),
+                    expected_candidate_fingerprint=payload.get(
+                        "candidate_fingerprint"
+                    ),
+                    expected_gate_fingerprint=payload.get(
+                        "gate_fingerprint"
+                    ),
+                    decision="approve",
+                )
+            )
+        except (ValueError, WorkspaceError) as error:
+            raise WorkspaceError(
+                code="invalid_sop_version",
+                message=(
+                    f"SOP Version lineage is invalid: {sop_id} "
+                    f"{version_name}."
+                ),
+                next_action=(
+                    "Restore the candidate, reproduction, and approved "
+                    "version from Git."
+                ),
+            ) from error
         if (
             approval.get("decision") != "approve"
             or approval.get("candidate_id") != candidate.asset_id
@@ -1180,6 +1222,43 @@ class SopRepository:
     def _next_version(self, sop_id: str) -> int:
         versions = self.list_sop_versions(sop_id)
         return max((item.version for item in versions), default=0) + 1
+
+    def _publication_identity(
+        self,
+        model_manifest_path: Path,
+        sop_manifest_path: Path,
+    ) -> tuple[str, str]:
+        identities: set[tuple[str, str]] = set()
+        for path in (model_manifest_path, sop_manifest_path):
+            self._validate_path(path)
+            if not path.exists():
+                continue
+            if path.is_symlink() or not path.is_file():
+                self._publication_conflict(path)
+            payload = self._load_json(path, "sop_publication_conflict")
+            approval_id = payload.get("approval_id")
+            created_at = payload.get("created_at")
+            if (
+                not isinstance(approval_id, str)
+                or SAFE_ID_PATTERN.fullmatch(approval_id) is None
+                or not isinstance(created_at, str)
+                or not created_at.strip()
+            ):
+                self._publication_conflict(path)
+            identities.add((approval_id, created_at))
+        if len(identities) > 1:
+            self._publication_conflict(sop_manifest_path)
+        if identities:
+            return next(iter(identities))
+        return self._new_approval_id(), self._timestamp()
+
+    @staticmethod
+    def _publication_conflict(path: Path) -> None:
+        raise WorkspaceError(
+            code="sop_publication_conflict",
+            message=f"Formal SOP publication state conflicts at {path}.",
+            next_action="Restore the immutable version before retrying.",
+        )
 
     def _load_approval(
         self,

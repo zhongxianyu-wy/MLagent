@@ -25,7 +25,7 @@ def test_bootstrap_memory_cli_creates_workspace_via_domain_core(tmp_path, capsys
     assert exit_code == 0
     assert payload["ready"] is True
     assert payload["repository_path"] == str(repository_path.resolve())
-    assert payload["indexed_assets"] == 1
+    assert payload["indexed_assets"] == 2
     assert DomainCore().open_workspace(connection_path).repository_id == payload["repository_id"]
 
 

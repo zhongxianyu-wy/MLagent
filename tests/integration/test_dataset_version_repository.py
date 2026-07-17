@@ -325,10 +325,11 @@ def test_committed_dataset_version_is_compatible_with_local_index(tmp_path):
 
     assert [asset["asset_id"] for asset in assets] == [
         "tmr-1",
+        "reviewer-policy",
         created.asset_id,
     ]
-    assert assets[1]["asset_type"] == "dataset_version"
-    assert assets[1]["state"] == "confirmed"
+    assert assets[2]["asset_type"] == "dataset_version"
+    assert assets[2]["state"] == "confirmed"
 
 
 def test_latest_returns_most_recent_version_across_dataset_families(tmp_path):

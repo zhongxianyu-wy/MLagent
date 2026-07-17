@@ -238,6 +238,200 @@ def test_authorized_approval_publishes_sop_and_reproduction_model(tmp_path):
     )
 
 
+def test_approval_retry_resumes_an_interrupted_publication(tmp_path, monkeypatch):
+    workspace = build_sop_workspace(tmp_path)
+    approval_ids = iter(("sop-approval-first", "sop-approval-second"))
+    repository = SopRepository(
+        workspace.root,
+        candidate_id_factory=lambda: "candidate-1",
+        gate_id_factory=lambda: "gate-1",
+        approval_id_factory=lambda: next(approval_ids),
+        clock=lambda: "2026-07-17T00:10:00Z",
+    )
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    original_publish = repository._publish_exact_file
+    publish_calls = 0
+
+    def interrupt_before_approval(target, raw):
+        nonlocal publish_calls
+        publish_calls += 1
+        if publish_calls == 4:
+            raise WorkspaceError(
+                code="sop_publication_failed",
+                message="simulated interruption",
+                next_action="retry",
+            )
+        original_publish(target, raw)
+
+    monkeypatch.setattr(
+        repository,
+        "_publish_exact_file",
+        interrupt_before_approval,
+    )
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            review_spec(candidate, gate),
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+    assert caught.value.code == "sop_publication_failed"
+    assert repository.list_sop_versions(candidate.sop_id) == ()
+
+    monkeypatch.setattr(repository, "_publish_exact_file", original_publish)
+    outcome = repository.review_candidate(
+        review_spec(candidate, gate),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+
+    assert outcome.approval_id == "sop-approval-first"
+    assert outcome.sop_version.version == 1
+    assert repository.list_sop_versions(candidate.sop_id) == (
+        outcome.sop_version,
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_fingerprint", "gate_fingerprint", "expected_code"),
+    (
+        ("0" * 64, None, "stale_sop_candidate"),
+        (None, "0" * 64, "stale_sop_review"),
+    ),
+)
+def test_review_rejects_stale_expected_fingerprints(
+    tmp_path,
+    candidate_fingerprint,
+    gate_fingerprint,
+    expected_code,
+):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    spec = SopReviewSpec(
+        candidate_id=candidate.asset_id,
+        expected_candidate_fingerprint=(
+            candidate_fingerprint or candidate.candidate_fingerprint
+        ),
+        expected_gate_fingerprint=gate_fingerprint or gate.gate_fingerprint,
+        decision="approve",
+    )
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            spec,
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert caught.value.code == expected_code
+    assert repository.list_sop_versions(candidate.sop_id) == ()
+    assert not (workspace.root / "models/formal").exists()
+
+
+def test_replacing_published_model_invalidates_formal_version(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    outcome = repository.review_candidate(
+        review_spec(candidate, gate),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    (workspace.root / outcome.formal_model.model_path).write_bytes(
+        b"replaced-formal-model"
+    )
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.load_sop_version(candidate.sop_id, 1)
+
+    assert caught.value.code == "invalid_formal_model"
+
+
+def test_gate_substitution_across_candidate_directories_is_rejected(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    substituted = (
+        workspace.root
+        / "approvals/sop-reproductions/candidate-other"
+        / f"{gate.asset_id}.json"
+    )
+    substituted.parent.mkdir(parents=True)
+    substituted.write_bytes((workspace.root / gate.asset_path).read_bytes())
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.load_gate(gate.asset_id, "candidate-other")
+
+    assert caught.value.code == "invalid_sop_reproduction_gate"
+
+
+def test_tampered_reproduction_model_invalidates_approved_sop(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    repository.review_candidate(
+        review_spec(candidate, gate),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    reproduction = RunRepository(workspace.root).load_instance(
+        gate.reproduction_run_id,
+        gate.reproduction_instance_id,
+    )
+    reproduction_model = (
+        workspace.root / reproduction.asset_path
+    ).parent / reproduction.model_path
+    reproduction_model.write_bytes(b"tampered-reproduction-model")
+
+    with pytest.raises(WorkspaceError):
+        repository.load_sop_version(candidate.sop_id, 1)
+
+
 def test_unauthorized_approval_creates_no_formal_assets(tmp_path):
     workspace = build_sop_workspace(tmp_path)
     repository = promotion_repository(workspace)

@@ -87,6 +87,40 @@ def test_identical_candidate_request_is_idempotent(sop_workspace):
     assert len(list((sop_workspace.root / "sops/candidates").rglob("*.json"))) == 1
 
 
+def test_sop_id_must_leave_room_for_versioned_formal_asset_ids(sop_workspace):
+    spec = candidate_spec(sop_workspace)
+
+    with pytest.raises(ValueError, match="at most 88"):
+        SopCandidateSpec(
+            sop_id="s" * 89,
+            name=spec.name,
+            source_run_id=spec.source_run_id,
+            source_instance_id=spec.source_instance_id,
+            strategy_summary=spec.strategy_summary,
+            optimization_background=spec.optimization_background,
+            steps=spec.steps,
+            change_summary=spec.change_summary,
+        )
+
+
+def test_candidate_manifest_symlink_is_rejected(sop_workspace):
+    repository = candidate_repository(sop_workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(sop_workspace),
+        actor_id="alice",
+        capacity=sop_workspace.capacity,
+    )
+    manifest = sop_workspace.root / candidate.asset_path
+    preserved = sop_workspace.root / "candidate-manifest-preserved.json"
+    manifest.rename(preserved)
+    manifest.symlink_to(preserved)
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.load_candidate(candidate.asset_id)
+
+    assert caught.value.code == "unsafe_sop_path"
+
+
 @pytest.mark.parametrize(
     ("role", "relative_path"),
     (
