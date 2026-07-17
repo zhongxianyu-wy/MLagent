@@ -1,9 +1,14 @@
 import hashlib
+import json
 from decimal import Decimal
 from dataclasses import replace
 
 import pytest
 
+from src.domain.memory_repository import (
+    REVIEWER_POLICY_PATH,
+    MemoryRepository,
+)
 from src.domain.models import TrainingExecutionResult, WorkspaceError
 from src.domain.run_repository import RunRepository
 from src.domain.sop_promotion import (
@@ -285,6 +290,8 @@ def test_approval_retry_resumes_an_interrupted_publication(tmp_path, monkeypatch
         )
     assert caught.value.code == "sop_publication_failed"
     assert repository.list_sop_versions(candidate.sop_id) == ()
+    with pytest.raises(WorkspaceError):
+        repository.get_formal_model("model-sop-random-forest-v0001")
 
     monkeypatch.setattr(repository, "_publish_exact_file", original_publish)
     outcome = repository.review_candidate(
@@ -331,6 +338,9 @@ def test_review_rejects_stale_expected_fingerprints(
             candidate_fingerprint or candidate.candidate_fingerprint
         ),
         expected_gate_fingerprint=gate_fingerprint or gate.gate_fingerprint,
+        expected_reviewer_policy_fingerprint=(
+            _fixture_reviewer_policy_fingerprint()
+        ),
         decision="approve",
     )
 
@@ -430,6 +440,117 @@ def test_tampered_reproduction_model_invalidates_approved_sop(tmp_path):
 
     with pytest.raises(WorkspaceError):
         repository.load_sop_version(candidate.sop_id, 1)
+
+
+def test_tampered_reproduction_binding_cannot_be_resealed_for_approval(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    reproduction_manifest = (
+        workspace.root
+        / "runs"
+        / gate.reproduction_run_id
+        / "instances"
+        / gate.reproduction_instance_id
+        / "manifest.json"
+    )
+    reproduction_payload = json.loads(reproduction_manifest.read_text())
+    reproduction_payload["configuration_fingerprint"] = "0" * 64
+    _reseal(reproduction_payload, "manifest_fingerprint")
+    reproduction_manifest.write_text(
+        json.dumps(reproduction_payload, indent=2, sort_keys=True) + "\n"
+    )
+    gate_path = workspace.root / gate.asset_path
+    gate_payload = json.loads(gate_path.read_text())
+    gate_payload["reproduction_instance_fingerprint"] = (
+        reproduction_payload["manifest_fingerprint"]
+    )
+    _reseal(gate_payload, "gate_fingerprint")
+    gate_path.write_text(
+        json.dumps(gate_payload, indent=2, sort_keys=True) + "\n"
+    )
+    resealed_gate = repository.load_gate(gate.asset_id, candidate.asset_id)
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            review_spec(candidate, resealed_gate),
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert caught.value.code == "invalid_sop_reproduction_gate"
+    assert repository.list_sop_versions(candidate.sop_id) == ()
+
+
+def test_uncommitted_reviewer_policy_cannot_self_authorize_actor(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    policy_path = workspace.root / REVIEWER_POLICY_PATH
+    policy = json.loads(policy_path.read_text())
+    policy["reviewer_ids"] = ["alice", "bob"]
+    policy.pop("policy_fingerprint")
+    policy["policy_fingerprint"] = MemoryRepository.reviewer_policy_fingerprint(
+        policy
+    )
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n")
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            review_spec(candidate, gate),
+            actor_id="bob",
+            capacity=workspace.capacity,
+        )
+
+    assert caught.value.code == "reviewer_policy_uncommitted"
+    assert repository.list_sop_versions(candidate.sop_id) == ()
+
+
+def test_stale_reviewer_policy_fingerprint_cannot_approve(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    stale = replace(
+        review_spec(candidate, gate),
+        expected_reviewer_policy_fingerprint="0" * 64,
+    )
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            stale,
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert caught.value.code == "stale_reviewer_policy"
+    assert repository.list_sop_versions(candidate.sop_id) == ()
 
 
 def test_unauthorized_approval_creates_no_formal_assets(tmp_path):
@@ -565,8 +686,37 @@ def review_spec(candidate, gate):
         candidate_id=candidate.asset_id,
         expected_candidate_fingerprint=candidate.candidate_fingerprint,
         expected_gate_fingerprint=gate.gate_fingerprint,
+        expected_reviewer_policy_fingerprint=(
+            _fixture_reviewer_policy_fingerprint()
+        ),
         decision="approve",
     )
+
+
+def _fixture_reviewer_policy_fingerprint():
+    return MemoryRepository.reviewer_policy_fingerprint(
+        {
+            "asset_type": "reviewer_policy",
+            "asset_id": "reviewer-policy",
+            "schema_version": 1,
+            "reviewer_ids": ["alice"],
+            "created_at": "2026-07-17T00:00:00Z",
+            "created_by": "alice",
+        }
+    )
+
+
+def _reseal(payload, fingerprint_field):
+    canonical = dict(payload)
+    canonical.pop(fingerprint_field, None)
+    payload[fingerprint_field] = hashlib.sha256(
+        json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def make_coordinator(

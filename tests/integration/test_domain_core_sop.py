@@ -10,6 +10,7 @@ from src.domain.models import (
     ReviewSopCandidateCommand,
     WorkspaceError,
 )
+from src.domain.memory_repository import load_reviewer_policy_fingerprint
 from tests.integration.test_sop_promotion import DeterministicExecutor
 from tests.integration.test_sop_repository import build_sop_workspace
 
@@ -47,6 +48,9 @@ def test_domain_core_promotes_one_training_instance_end_to_end(tmp_path):
             candidate_id=candidate.asset_id,
             expected_candidate_fingerprint=candidate.candidate_fingerprint,
             expected_gate_fingerprint=gate.gate_fingerprint,
+            expected_reviewer_policy_fingerprint=(
+                load_reviewer_policy_fingerprint(workspace.root)
+            ),
             decision="approve",
         )
     )

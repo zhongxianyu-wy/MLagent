@@ -125,6 +125,7 @@ def test_sop_commands_validate_stable_ids_fingerprints_and_decisions():
         candidate_id=reproduce.candidate_id,
         expected_candidate_fingerprint=SHA_A,
         expected_gate_fingerprint=SHA_B,
+        expected_reviewer_policy_fingerprint=SHA_C,
         decision="approve",
     )
 
@@ -284,6 +285,8 @@ def version_snapshot(**updates) -> SopVersionSnapshot:
         "previous_version_id": None,
         "previous_version_fingerprint": None,
         "candidate_id": "candidate-1",
+        "gate_id": "gate-1",
+        "gate_fingerprint": SHA_B,
         "source_run_id": "run-source",
         "source_instance_id": "instance-source",
         "reproduction_run_id": "run-reproduction",
@@ -292,6 +295,9 @@ def version_snapshot(**updates) -> SopVersionSnapshot:
         "dataset_version": 1,
         "primary_metric_name": "roc_auc",
         "primary_metric_value": 0.81234552,
+        "source_metric_value": 0.81234551,
+        "reproduction_metric_value": 0.81234552,
+        "environment": {"python": "3.13", "sklearn": "1.7"},
         "strategy_summary": "Fit a calibrated random forest.",
         "optimization_background": "Improved the approved baseline.",
         "steps": ("Load frozen Dataset Version", "Execute train.py"),

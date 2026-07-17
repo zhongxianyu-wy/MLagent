@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from src.domain.dataset_repository import DatasetRepository
-from src.domain.memory_repository import load_authorized_reviewers
+from src.domain.memory_repository import validate_reviewer_policy_for_approval
 from src.domain.models import (
     CapacityStatus,
     FormalModelSnapshot,
@@ -109,6 +109,7 @@ class SopReviewSpec:
     candidate_id: str
     expected_candidate_fingerprint: str
     expected_gate_fingerprint: str
+    expected_reviewer_policy_fingerprint: str
     decision: str
 
     def __post_init__(self) -> None:
@@ -120,6 +121,7 @@ class SopReviewSpec:
         for field_name in (
             "expected_candidate_fingerprint",
             "expected_gate_fingerprint",
+            "expected_reviewer_policy_fingerprint",
         ):
             value = getattr(self, field_name)
             if (
@@ -598,7 +600,11 @@ class SopRepository:
     ) -> SopReviewOutcome:
         self._validate_actor(actor_id)
         with self._lock():
-            if actor_id not in load_authorized_reviewers(self.repository_path):
+            reviewers = validate_reviewer_policy_for_approval(
+                self.repository_path,
+                spec.expected_reviewer_policy_fingerprint,
+            )
+            if actor_id not in reviewers:
                 raise WorkspaceError(
                     code="unauthorized_sop_reviewer",
                     message=(
@@ -649,6 +655,9 @@ class SopRepository:
                     "candidate_fingerprint": candidate.candidate_fingerprint,
                     "gate_id": gate.asset_id,
                     "gate_fingerprint": gate.gate_fingerprint,
+                    "reviewer_policy_fingerprint": (
+                        spec.expected_reviewer_policy_fingerprint
+                    ),
                     "sop_id": candidate.sop_id,
                     "created_at": self._timestamp(),
                     "created_by": actor_id,
@@ -699,6 +708,23 @@ class SopRepository:
                 / f"{approval_id}.json"
             )
             model_bytes = chain["reproduction_model_path"].read_bytes()
+            run_repository = RunRepository(self.repository_path)
+            environment = run_repository.load_instance_environment(
+                candidate.source_run_id,
+                candidate.source_instance_id,
+            )
+            reproduction_environment = (
+                run_repository.load_instance_environment(
+                    gate.reproduction_run_id,
+                    gate.reproduction_instance_id,
+                )
+            )
+            if (
+                environment != reproduction_environment
+                or _fingerprint(environment)
+                != candidate.environment_fingerprint
+            ):
+                self._invalid_gate(gate.asset_id)
             model_fingerprint = _sha256(model_bytes)
             model_manifest: dict[str, Any] = {
                 "asset_type": "formal_model",
@@ -741,6 +767,9 @@ class SopRepository:
                 "candidate_fingerprint": candidate.candidate_fingerprint,
                 "gate_id": gate.asset_id,
                 "gate_fingerprint": gate.gate_fingerprint,
+                "reviewer_policy_fingerprint": (
+                    spec.expected_reviewer_policy_fingerprint
+                ),
                 "source_run_id": candidate.source_run_id,
                 "source_instance_id": candidate.source_instance_id,
                 "reproduction_run_id": gate.reproduction_run_id,
@@ -749,6 +778,9 @@ class SopRepository:
                 "dataset_version": candidate.dataset_version,
                 "primary_metric_name": candidate.primary_metric_name,
                 "primary_metric_value": gate.reproduction_metric_value,
+                "source_metric_value": gate.source_metric_value,
+                "reproduction_metric_value": gate.reproduction_metric_value,
+                "environment": environment,
                 "strategy_summary": candidate.strategy_summary,
                 "optimization_background": candidate.optimization_background,
                 "steps": list(candidate.steps),
@@ -768,6 +800,9 @@ class SopRepository:
                 "candidate_fingerprint": candidate.candidate_fingerprint,
                 "gate_id": gate.asset_id,
                 "gate_fingerprint": gate.gate_fingerprint,
+                "reviewer_policy_fingerprint": (
+                    spec.expected_reviewer_policy_fingerprint
+                ),
                 "sop_id": candidate.sop_id,
                 "sop_version_id": sop_version_id,
                 "sop_version_fingerprint": sop_manifest[
@@ -893,13 +928,13 @@ class SopRepository:
             version_name,
             payload.get("approval_id"),
         )
-        model = self.get_formal_model(payload.get("formal_model_id"))
+        model = self._load_formal_model(payload.get("formal_model_id"))
         model_manifest = self._load_json(
             self.repository_path / model.asset_path,
             "invalid_formal_model",
         )
         try:
-            candidate, gate, _ = self._validated_review_chain(
+            candidate, gate, chain = self._validated_review_chain(
                 SopReviewSpec(
                     candidate_id=payload.get("candidate_id"),
                     expected_candidate_fingerprint=payload.get(
@@ -908,7 +943,21 @@ class SopRepository:
                     expected_gate_fingerprint=payload.get(
                         "gate_fingerprint"
                     ),
+                    expected_reviewer_policy_fingerprint=payload.get(
+                        "reviewer_policy_fingerprint"
+                    ),
                     decision="approve",
+                )
+            )
+            run_repository = RunRepository(self.repository_path)
+            source_environment = run_repository.load_instance_environment(
+                chain["source"].run_id,
+                chain["source"].asset_id,
+            )
+            reproduction_environment = (
+                run_repository.load_instance_environment(
+                    chain["reproduction"].run_id,
+                    chain["reproduction"].asset_id,
                 )
             )
         except (ValueError, WorkspaceError) as error:
@@ -930,6 +979,8 @@ class SopRepository:
             != candidate.candidate_fingerprint
             or approval.get("gate_id") != gate.asset_id
             or approval.get("gate_fingerprint") != gate.gate_fingerprint
+            or approval.get("reviewer_policy_fingerprint")
+            != payload.get("reviewer_policy_fingerprint")
             or approval.get("sop_version_id") != payload.get("asset_id")
             or approval.get("sop_version_fingerprint") != fingerprint
             or approval.get("formal_model_id") != model.asset_id
@@ -940,6 +991,16 @@ class SopRepository:
             != candidate.candidate_fingerprint
             or payload.get("gate_fingerprint") != gate.gate_fingerprint
             or gate.outcome != "passed"
+            or payload.get("source_metric_value")
+            != gate.source_metric_value
+            or payload.get("reproduction_metric_value")
+            != gate.reproduction_metric_value
+            or payload.get("primary_metric_value")
+            != gate.reproduction_metric_value
+            or payload.get("environment") != source_environment
+            or source_environment != reproduction_environment
+            or _fingerprint(source_environment)
+            != candidate.environment_fingerprint
             or model.sop_version_id != payload.get("asset_id")
             or model.approval_id != payload.get("approval_id")
             or model.source_instance_id
@@ -970,6 +1031,8 @@ class SopRepository:
                     "previous_version_fingerprint"
                 ],
                 candidate_id=payload["candidate_id"],
+                gate_id=payload["gate_id"],
+                gate_fingerprint=payload["gate_fingerprint"],
                 source_run_id=payload["source_run_id"],
                 source_instance_id=payload["source_instance_id"],
                 reproduction_run_id=payload["reproduction_run_id"],
@@ -980,6 +1043,11 @@ class SopRepository:
                 dataset_version=payload["dataset_version"],
                 primary_metric_name=payload["primary_metric_name"],
                 primary_metric_value=float(payload["primary_metric_value"]),
+                source_metric_value=float(payload["source_metric_value"]),
+                reproduction_metric_value=float(
+                    payload["reproduction_metric_value"]
+                ),
+                environment=payload["environment"],
                 strategy_summary=payload["strategy_summary"],
                 optimization_background=payload[
                     "optimization_background"
@@ -999,6 +1067,20 @@ class SopRepository:
             ) from error
 
     def get_formal_model(self, model_id: str) -> FormalModelSnapshot:
+        model = self._load_formal_model(model_id)
+        match = re.fullmatch(r"(.+)-v([0-9]{4})", model.sop_version_id)
+        if match is None:
+            self._invalid_model(model_id)
+        version = self.load_sop_version(match.group(1), int(match.group(2)))
+        if (
+            version.asset_id != model.sop_version_id
+            or version.formal_model_id != model.asset_id
+            or version.approval_id != model.approval_id
+        ):
+            self._invalid_model(model_id)
+        return model
+
+    def _load_formal_model(self, model_id: str) -> FormalModelSnapshot:
         self._validate_id(model_id, "model_id")
         relative = FORMAL_MODEL_ROOT / model_id / "manifest.json"
         payload = self._load_json(
@@ -1099,7 +1181,7 @@ class SopRepository:
         if (
             not isinstance(comparisons, dict)
             or not comparisons
-            or not all(value is True for value in comparisons.values())
+            or any(not isinstance(value, bool) for value in comparisons.values())
         ):
             self._invalid_gate(gate.asset_id)
         run_repository = RunRepository(self.repository_path)
@@ -1127,8 +1209,42 @@ class SopRepository:
         expected_model_path = reproduction_model.relative_to(
             self.repository_path
         ).as_posix()
+        recomputed_comparisons = {
+            "approval_fingerprint": (
+                reproduction.approval_fingerprint
+                == source.approval_fingerprint
+            ),
+            "code_fingerprint": (
+                reproduction.code_fingerprint == source.code_fingerprint
+            ),
+            "configuration_fingerprint": (
+                reproduction.configuration_fingerprint
+                == source.configuration_fingerprint
+            ),
+            "dataset_content_fingerprint": (
+                reproduction.dataset_content_fingerprint
+                == source.dataset_content_fingerprint
+            ),
+            "dataset_version_fingerprint": (
+                reproduction.dataset_version_fingerprint
+                == source.dataset_version_fingerprint
+            ),
+            "environment_fingerprint": (
+                reproduction.environment_fingerprint
+                == source.environment_fingerprint
+            ),
+            "plan_fingerprint": (
+                reproduction.plan_fingerprint == source.plan_fingerprint
+            ),
+            "random_seed": reproduction.random_seed == source.random_seed,
+            "split_fingerprint": (
+                reproduction.split_fingerprint == source.split_fingerprint
+            ),
+        }
         if (
-            gate_payload.get("source_instance_fingerprint")
+            comparisons != recomputed_comparisons
+            or not all(recomputed_comparisons.values())
+            or gate_payload.get("source_instance_fingerprint")
             != run_repository.instance_fingerprint(source)
             or gate_payload.get("reproduction_instance_fingerprint")
             != run_repository.instance_fingerprint(reproduction)
@@ -1141,6 +1257,7 @@ class SopRepository:
             or gate.reproduction_metric_value
             != reproduction.primary_metric_value
             or gate.source_metric_value != source.primary_metric_value
+            or reproduction.primary_metric_name != source.primary_metric_name
             or gate.source_metric_six_decimals
             != gate.reproduction_metric_six_decimals
         ):

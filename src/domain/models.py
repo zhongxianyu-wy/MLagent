@@ -392,6 +392,7 @@ class ReviewSopCandidateCommand:
     candidate_id: str
     expected_candidate_fingerprint: str
     expected_gate_fingerprint: str
+    expected_reviewer_policy_fingerprint: str
     decision: str
 
     def __post_init__(self) -> None:
@@ -403,6 +404,10 @@ class ReviewSopCandidateCommand:
         _validate_sha256(
             self.expected_gate_fingerprint,
             "expected_gate_fingerprint",
+        )
+        _validate_sha256(
+            self.expected_reviewer_policy_fingerprint,
+            "expected_reviewer_policy_fingerprint",
         )
         _validate_state(self.decision, _SOP_REVIEW_DECISIONS, "decision")
 
@@ -589,6 +594,8 @@ class SopVersionSnapshot:
     previous_version_id: str | None
     previous_version_fingerprint: str | None
     candidate_id: str
+    gate_id: str
+    gate_fingerprint: str
     source_run_id: str
     source_instance_id: str
     reproduction_run_id: str
@@ -597,6 +604,9 @@ class SopVersionSnapshot:
     dataset_version: int
     primary_metric_name: str
     primary_metric_value: float
+    source_metric_value: float
+    reproduction_metric_value: float
+    environment: dict[str, Any]
     strategy_summary: str
     optimization_background: str
     steps: tuple[str, ...]
@@ -612,6 +622,7 @@ class SopVersionSnapshot:
             "asset_id",
             "sop_id",
             "candidate_id",
+            "gate_id",
             "source_run_id",
             "source_instance_id",
             "reproduction_run_id",
@@ -625,6 +636,7 @@ class SopVersionSnapshot:
         _validate_positive(self.version, "version")
         _validate_positive(self.dataset_version, "dataset_version")
         _validate_sha256(self.version_fingerprint, "version_fingerprint")
+        _validate_sha256(self.gate_fingerprint, "gate_fingerprint")
         if self.version == 1:
             if self.previous_version_id is not None:
                 raise ValueError("version 1 cannot have previous_version_id")
@@ -650,6 +662,22 @@ class SopVersionSnapshot:
             )
         _validate_non_empty(self.primary_metric_name, "primary_metric_name")
         _validate_metric(self.primary_metric_value, "primary_metric_value")
+        _validate_metric(self.source_metric_value, "source_metric_value")
+        _validate_metric(
+            self.reproduction_metric_value,
+            "reproduction_metric_value",
+        )
+        if (
+            not isinstance(self.environment, dict)
+            or not self.environment
+            or any(not isinstance(key, str) or not key for key in self.environment)
+        ):
+            raise ValueError("environment must be a non-empty JSON object")
+        object.__setattr__(
+            self,
+            "environment",
+            MappingProxyType(dict(self.environment)),
+        )
         _validate_non_empty(self.strategy_summary, "strategy_summary")
         _validate_non_empty(
             self.optimization_background,

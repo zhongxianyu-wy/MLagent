@@ -125,6 +125,21 @@ def test_sop_overview_displays_approved_version_and_metric_trend(
     assert any("sop-random-forest-v0001" in item.value for item in app.markdown)
     assert app.get("arrow_vega_lite_chart") or app.get("vega_lite_chart")
     assert any("instance-reproduction" in item.value for item in app.markdown)
+    assert any("Reproduction gate" in item.value for item in app.markdown)
+    assert {metric.label for metric in app.metric} >= {
+        "Gate source",
+        "Gate reproduction",
+    }
+    environment_tables = [
+        table.value
+        for table in app.dataframe
+        if {"Environment", "Value"}.issubset(table.value.columns)
+    ]
+    assert len(environment_tables) == 1
+    assert set(environment_tables[0]["Environment"]) == {
+        "python",
+        "sklearn",
+    }
 
 
 def write_connection(tmp_path, repository_path):

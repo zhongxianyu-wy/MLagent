@@ -14,7 +14,11 @@ from src.domain.exploration_repository import ExplorationRepository
 from src.domain.experience_repository import ExperienceRepository
 from src.domain.git_sync import GitSyncService
 from src.domain.local_index import LocalIndex
-from src.domain.memory_repository import MemoryRepository, RepositoryStatus
+from src.domain.memory_repository import (
+    MemoryRepository,
+    RepositoryStatus,
+    load_reviewer_policy_fingerprint,
+)
 from src.domain.models import (
     ApproveExplorationPlanCommand,
     AuthorizeTrainingCommand,
@@ -695,6 +699,9 @@ class DomainCore:
                     command.expected_candidate_fingerprint
                 ),
                 expected_gate_fingerprint=command.expected_gate_fingerprint,
+                expected_reviewer_policy_fingerprint=(
+                    command.expected_reviewer_policy_fingerprint
+                ),
                 decision=command.decision,
             ),
             actor_id=connection.actor_id,
@@ -720,6 +727,13 @@ class DomainCore:
         return self._sop_repository(
             repository.repository_path
         ).list_candidate_statuses()
+
+    def get_sop_reviewer_policy_fingerprint(
+        self,
+        connection_path: Path,
+    ) -> str:
+        _, repository = self._open_connected_repository(connection_path)
+        return load_reviewer_policy_fingerprint(repository.repository_path)
 
     def list_sop_versions(
         self,

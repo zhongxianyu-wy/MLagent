@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -65,6 +66,9 @@ def main() -> None:
         experiences = core.list_experiences(connection_path)
         sop_candidates = core.list_sop_candidate_statuses(connection_path)
         sop_versions = core.list_sop_versions(connection_path)
+        sop_reviewer_policy_fingerprint = (
+            core.get_sop_reviewer_policy_fingerprint(connection_path)
+        )
     except WorkspaceError as error:
         st.error(error.message)
         st.caption(error.next_action)
@@ -134,6 +138,7 @@ def main() -> None:
             shell.run_statuses,
             shell.sop_candidates,
             shell.sop_versions,
+            sop_reviewer_policy_fingerprint,
         )
 
     for issue in shell.issues:
@@ -467,6 +472,7 @@ def _render_sop_overview(
     run_statuses: tuple[RunStatusSnapshot, ...],
     candidates: tuple[SopCandidateStatus, ...],
     versions: tuple[SopVersionSnapshot, ...],
+    reviewer_policy_fingerprint: str,
 ) -> None:
     candidate_tab, version_tab = st.tabs(
         ("Candidates", "Approved Versions")
@@ -477,6 +483,7 @@ def _render_sop_overview(
             connection_path,
             run_statuses,
             candidates,
+            reviewer_policy_fingerprint,
         )
     with version_tab:
         _render_sop_versions(core, connection_path, versions)
@@ -487,6 +494,7 @@ def _render_sop_candidate_workspace(
     connection_path: Path,
     run_statuses: tuple[RunStatusSnapshot, ...],
     candidates: tuple[SopCandidateStatus, ...],
+    reviewer_policy_fingerprint: str,
 ) -> None:
     eligible = tuple(
         (status.run_id, round_status.instance_id)
@@ -664,6 +672,9 @@ def _render_sop_candidate_workspace(
                         expected_gate_fingerprint=(
                             selected.gate.gate_fingerprint
                         ),
+                        expected_reviewer_policy_fingerprint=(
+                            reviewer_policy_fingerprint
+                        ),
                         decision=decision,
                     )
                 )
@@ -710,6 +721,38 @@ def _render_sop_versions(
     for column, (label, value) in zip(summary_columns, summary):
         with column:
             st.metric(label, value)
+    st.markdown(
+        f"**Reproduction gate: Passed** `{selected.gate_id}`"
+    )
+    gate_columns = st.columns(2)
+    gate_values = (
+        ("Gate source", f"{selected.source_metric_value:.6f}"),
+        (
+            "Gate reproduction",
+            f"{selected.reproduction_metric_value:.6f}",
+        ),
+    )
+    for column, (label, value) in zip(gate_columns, gate_values):
+        with column:
+            st.metric(label, value)
+    st.markdown("**Frozen environment**")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Environment": key,
+                    "Value": (
+                        value
+                        if isinstance(value, str)
+                        else json.dumps(value, sort_keys=True)
+                    ),
+                }
+                for key, value in sorted(selected.environment.items())
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
     st.markdown("**Training strategy**")
     st.write(selected.strategy_summary)
     st.markdown("**Optimization background**")
