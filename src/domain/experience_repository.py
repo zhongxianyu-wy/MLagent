@@ -17,6 +17,7 @@ from src.domain.models import (
     ExperienceContent,
     ExperienceEvidence,
     ExperienceSnapshot,
+    ReviewExperienceCommand,
     SessionExperienceOutcome,
     WorkspaceError,
 )
@@ -28,6 +29,23 @@ SESSION_ROOT = Path("raw-records/sessions")
 RUN_EVENT_ROOT = Path("raw-records/runs")
 RUN_ROOT = Path("runs")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+ALLOWED_TRANSITIONS = {
+    "pending": frozenset({"approve", "reject", "conflict"}),
+    "conflict": frozenset({"approve", "reject"}),
+    "trusted": frozenset({"supersede"}),
+    "rejected": frozenset(),
+    "superseded": frozenset(),
+}
+DECISION_STATE = {
+    "approve": "trusted",
+    "reject": "rejected",
+    "conflict": "conflict",
+    "supersede": "superseded",
+}
+DECISION_RELATION = {
+    "conflict": "conflicts_with",
+    "supersede": "superseded_by",
+}
 
 
 class ExperienceRepository:
@@ -146,6 +164,13 @@ class ExperienceRepository:
         )
 
     def current(self, experience_id: str) -> ExperienceSnapshot:
+        history = self.history(experience_id)
+        return history[-1]
+
+    def history(
+        self,
+        experience_id: str,
+    ) -> tuple[ExperienceSnapshot, ...]:
         self._validate_id(experience_id, "Experience ID")
         family = self.repository_path / EXPERIENCE_ROOT / experience_id
         self._validate_path(family)
@@ -159,25 +184,142 @@ class ExperienceRepository:
             self._load_experience(path, experience_id)
             for path in sorted(family.glob("*.json"))
         ]
-        if len(events) != 1:
+        if not events:
+            self._invalid_experience(experience_id)
+        by_id = {event.event_id: event for event in events}
+        if len(by_id) != len(events):
+            self._invalid_experience(experience_id)
+        roots = [event for event in events if event.previous_event_id is None]
+        predecessors = {
+            event.previous_event_id
+            for event in events
+            if event.previous_event_id is not None
+        }
+        heads = [event for event in events if event.event_id not in predecessors]
+        if len(roots) != 1 or len(heads) != 1:
             raise WorkspaceError(
                 code="experience_conflict",
-                message=f"Experience history is not a single event: {experience_id}.",
+                message=f"Experience history has concurrent heads: {experience_id}.",
                 next_action="Restore or reconcile the Experience event history.",
             )
-        return events[0]
+        reverse = []
+        visited = set()
+        cursor: ExperienceSnapshot | None = heads[0]
+        while cursor is not None:
+            if cursor.event_id in visited:
+                self._invalid_experience(experience_id)
+            visited.add(cursor.event_id)
+            reverse.append(cursor)
+            predecessor = cursor.previous_event_id
+            if predecessor is None:
+                cursor = None
+            elif predecessor not in by_id:
+                self._invalid_experience(experience_id)
+            else:
+                cursor = by_id[predecessor]
+        if len(visited) != len(events) or reverse[-1].state != "pending":
+            self._invalid_experience(experience_id)
+        return tuple(reversed(reverse))
 
-    def pending_count(self) -> int:
+    def list_current(
+        self,
+        states: tuple[str, ...] | None = None,
+    ) -> tuple[ExperienceSnapshot, ...]:
         root = self.repository_path / EXPERIENCE_ROOT
         self._validate_path(root)
         if not root.is_dir():
-            return 0
-        count = 0
+            return ()
+        selected = set(states) if states is not None else None
+        items = []
         for family in sorted(root.iterdir()):
-            if family.is_dir() and SAFE_ID_PATTERN.fullmatch(family.name):
-                if self.current(family.name).state == "pending":
-                    count += 1
-        return count
+            if not family.is_dir() or SAFE_ID_PATTERN.fullmatch(family.name) is None:
+                raise WorkspaceError(
+                    code="invalid_experience",
+                    message="Experience directory contains an invalid identity.",
+                    next_action="Restore the Experience assets from Git.",
+                )
+            current = self.current(family.name)
+            if selected is None or current.state in selected:
+                items.append(current)
+        return tuple(
+            sorted(
+                items,
+                key=lambda item: (item.created_at, item.asset_id),
+                reverse=True,
+            )
+        )
+
+    def review(
+        self,
+        command: ReviewExperienceCommand,
+        actor_id: str,
+        capacity: CapacityStatus,
+    ) -> ExperienceSnapshot:
+        self._validate_actor(actor_id)
+        with self._lock():
+            current = self.current(command.experience_id)
+            allowed = ALLOWED_TRANSITIONS[current.state]
+            if command.decision not in allowed:
+                raise WorkspaceError(
+                    code="invalid_experience_transition",
+                    message=(
+                        f"Experience transition from {current.state} through "
+                        f"{command.decision} is not allowed."
+                    ),
+                    next_action="Choose an action allowed for the current Experience state.",
+                )
+            related = None
+            if command.related_experience_id is not None:
+                related = self.current(command.related_experience_id)
+                if command.decision == "supersede" and related.state != "trusted":
+                    raise WorkspaceError(
+                        code="invalid_experience_replacement",
+                        message="An Experience can be superseded only by a current Trusted Experience.",
+                        next_action="Approve the replacement Experience before superseding the old one.",
+                    )
+                if command.decision == "conflict" and related.state in {
+                    "rejected",
+                    "superseded",
+                }:
+                    raise WorkspaceError(
+                        code="invalid_experience_relation",
+                        message="A conflict must reference a current reviewable Experience.",
+                        next_action="Choose a Pending, Conflict, or Trusted Experience.",
+                    )
+            reviewed_at = self._timestamp()
+            event_id = f"experience-event-{uuid.uuid4()}"
+            next_state = DECISION_STATE[command.decision]
+            payload = {
+                "asset_type": "experience_event",
+                "asset_id": event_id,
+                "experience_id": current.asset_id,
+                "schema_version": EXPERIENCE_SCHEMA_VERSION,
+                "previous_event_id": current.event_id,
+                "state": next_state,
+                "content": command.content.to_dict(),
+                "evidence": [item.to_dict() for item in current.evidence],
+                "extraction_session_id": current.extraction_session_id,
+                "source_kind": current.source_kind,
+                "relation_type": DECISION_RELATION.get(command.decision),
+                "related_experience_id": (
+                    None if related is None else related.asset_id
+                ),
+                "created_at": reviewed_at,
+                "created_by": actor_id,
+                "reviewed_at": reviewed_at,
+                "reviewed_by": actor_id,
+                "decision": command.decision,
+            }
+            relative = (
+                EXPERIENCE_ROOT
+                / current.asset_id
+                / f"{event_id}.json"
+            )
+            self._write_new(relative, payload, capacity)
+            return self._snapshot(payload, relative)
+
+    def pending_count(self) -> int:
+        return len(self.list_current(("pending",)))
 
     def _extract_candidate(
         self,

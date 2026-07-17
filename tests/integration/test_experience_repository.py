@@ -1,12 +1,13 @@
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from src.domain.experience_repository import ExperienceRepository
 from src.domain.memory_repository import MemoryRepository
-from src.domain.models import WorkspaceError
+from src.domain.models import ReviewExperienceCommand, WorkspaceError
 
 
 @pytest.fixture
@@ -311,3 +312,353 @@ def test_missing_session_marker_fails_without_fabricating_records(
         experience_workspace.root
         / "raw-records/sessions/missing-session"
     ).exists()
+
+
+def test_approval_appends_trusted_event_and_preserves_candidate_wording(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    pending = create_pending(workspace, "session-review", "instance-review")
+    original = pending.content
+    revised = replace(
+        original,
+        conclusion="Reviewed feature filtering improvement.",
+        confidence=0.9,
+    )
+
+    trusted = workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=pending.asset_id,
+            decision="approve",
+            content=revised,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+    assert trusted.state == "trusted"
+    assert trusted.previous_event_id == pending.event_id
+    assert trusted.content == revised
+    assert trusted.reviewed_by == "reviewer"
+    history = workspace.repository.history(pending.asset_id)
+    assert tuple(item.state for item in history) == ("pending", "trusted")
+    assert history[0].content == original
+    assert history[0].reviewed_by is None
+
+
+def test_pending_can_be_rejected_or_marked_conflict(experience_workspace):
+    workspace = experience_workspace
+    first = create_pending(workspace, "session-first", "instance-first")
+    second = create_pending(
+        workspace,
+        "session-second",
+        "instance-second",
+        parent_id="instance-first",
+        parent_metric=0.8,
+        metric=0.85,
+    )
+
+    conflict = workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=first.asset_id,
+            decision="conflict",
+            content=first.content,
+            related_experience_id=second.asset_id,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+    rejected = workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=second.asset_id,
+            decision="reject",
+            content=second.content,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+    assert conflict.state == "conflict"
+    assert conflict.relation_type == "conflicts_with"
+    assert conflict.related_experience_id == second.asset_id
+    assert rejected.state == "rejected"
+
+
+def test_conflict_can_be_resolved_by_approval(experience_workspace):
+    workspace = experience_workspace
+    first = create_pending(workspace, "session-first", "instance-first")
+    second = create_pending(
+        workspace,
+        "session-second",
+        "instance-second",
+        parent_id="instance-first",
+        parent_metric=0.8,
+        metric=0.85,
+    )
+    workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=first.asset_id,
+            decision="conflict",
+            content=first.content,
+            related_experience_id=second.asset_id,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+    trusted = workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=first.asset_id,
+            decision="approve",
+            content=replace(first.content, confidence=0.85),
+        ),
+        actor_id="reviewer-2",
+        capacity=workspace.capacity,
+    )
+
+    assert trusted.state == "trusted"
+    assert trusted.relation_type is None
+    assert tuple(
+        item.state for item in workspace.repository.history(first.asset_id)
+    ) == ("pending", "conflict", "trusted")
+
+
+def test_trusted_experience_can_be_superseded_only_by_another_trusted_head(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    old = approve(
+        workspace,
+        create_pending(workspace, "session-old", "instance-old-new"),
+    )
+    replacement = approve(
+        workspace,
+        create_pending(
+            workspace,
+            "session-replacement",
+            "instance-replacement",
+            parent_id="instance-old-new",
+            parent_metric=0.8,
+            metric=0.9,
+        ),
+    )
+
+    superseded = workspace.repository.review(
+        ReviewExperienceCommand(
+            connection_path=Path("unused.json"),
+            experience_id=old.asset_id,
+            decision="supersede",
+            content=old.content,
+            related_experience_id=replacement.asset_id,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+    assert superseded.state == "superseded"
+    assert superseded.relation_type == "superseded_by"
+    assert superseded.related_experience_id == replacement.asset_id
+    assert workspace.repository.current(replacement.asset_id).state == "trusted"
+
+
+@pytest.mark.parametrize(
+    ("start_state", "decision"),
+    (
+        ("trusted", "reject"),
+        ("rejected", "approve"),
+        ("rejected", "conflict"),
+        ("superseded", "approve"),
+    ),
+)
+def test_illegal_review_transitions_write_no_event(
+    experience_workspace,
+    start_state,
+    decision,
+):
+    workspace = experience_workspace
+    pending = create_pending(workspace, "session-illegal", "instance-illegal")
+    if start_state == "trusted":
+        current = approve(workspace, pending)
+    elif start_state == "rejected":
+        current = workspace.repository.review(
+            ReviewExperienceCommand(
+                Path("unused.json"),
+                pending.asset_id,
+                "reject",
+                pending.content,
+            ),
+            actor_id="reviewer",
+            capacity=workspace.capacity,
+        )
+    else:
+        current = approve(workspace, pending)
+        replacement = approve(
+            workspace,
+            create_pending(
+                workspace,
+                "session-replacement",
+                "instance-replacement",
+                parent_id="instance-illegal",
+                parent_metric=0.8,
+                metric=0.9,
+            ),
+        )
+        current = workspace.repository.review(
+            ReviewExperienceCommand(
+                Path("unused.json"),
+                current.asset_id,
+                "supersede",
+                current.content,
+                replacement.asset_id,
+            ),
+            actor_id="reviewer",
+            capacity=workspace.capacity,
+        )
+    before = tuple(workspace.repository.history(current.asset_id))
+    related = (
+        create_pending(
+            workspace,
+            "session-related",
+            "instance-related",
+            parent_id="instance-replacement"
+            if start_state == "superseded"
+            else "instance-illegal",
+            parent_metric=0.9 if start_state == "superseded" else 0.8,
+            metric=0.95,
+        ).asset_id
+        if decision == "conflict"
+        else None
+    )
+
+    with pytest.raises(WorkspaceError, match="transition"):
+        workspace.repository.review(
+            ReviewExperienceCommand(
+                Path("unused.json"),
+                current.asset_id,
+                decision,
+                current.content,
+                related,
+            ),
+            actor_id="reviewer",
+            capacity=workspace.capacity,
+        )
+
+    assert tuple(workspace.repository.history(current.asset_id)) == before
+
+
+def test_experience_lifecycle_never_changes_sop_or_model_assets(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.write_json(
+        "sops/sop-1/v0001/manifest.json",
+        {"asset_type": "sop_version", "asset_id": "sop-1:v1"},
+    )
+    model_path = workspace.root / "models/model-1/model.joblib"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    model_path.write_bytes(b"formal-model")
+    before = governed_bytes(workspace.root, ("sops", "models"))
+    pending = create_pending(workspace, "session-isolation", "instance-isolation")
+    trusted = approve(workspace, pending)
+
+    assert trusted.state == "trusted"
+    assert governed_bytes(workspace.root, ("sops", "models")) == before
+
+
+def test_changed_direct_evidence_invalidates_experience_projection(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    pending = create_pending(workspace, "session-tamper", "instance-tamper")
+    dataset_path = (
+        workspace.root / "datasets/dataset-1/v0001/manifest.json"
+    )
+    dataset_path.write_text('{"tampered": true}\n', encoding="utf-8")
+
+    with pytest.raises(WorkspaceError, match="missing or changed"):
+        workspace.repository.current(pending.asset_id)
+
+
+def test_concurrent_review_heads_fail_closed(experience_workspace):
+    workspace = experience_workspace
+    pending = create_pending(
+        workspace,
+        "session-concurrent",
+        "instance-concurrent",
+    )
+    trusted = approve(workspace, pending)
+    trusted_path = workspace.root / trusted.asset_path
+    concurrent = json.loads(trusted_path.read_text(encoding="utf-8"))
+    concurrent["asset_id"] = "experience-event-concurrent"
+    concurrent["state"] = "rejected"
+    concurrent["decision"] = "reject"
+    concurrent["content"]["conclusion"] = "Concurrent rejection."
+    workspace.write_json(
+        (
+            f"experiences/{pending.asset_id}/"
+            "experience-event-concurrent.json"
+        ),
+        concurrent,
+    )
+
+    with pytest.raises(WorkspaceError, match="concurrent heads"):
+        workspace.repository.current(pending.asset_id)
+
+
+def create_pending(
+    workspace,
+    session_id,
+    instance_id,
+    *,
+    parent_id="instance-parent",
+    parent_metric=0.7,
+    metric=0.8,
+):
+    if not (
+        workspace.root
+        / f"runs/run-1/instances/{parent_id}/manifest.json"
+    ).exists():
+        workspace.seed_instance(parent_id, metric=parent_metric)
+    workspace.repository.start_session(
+        session_id,
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        instance_id,
+        metric=metric,
+        parent_id=parent_id,
+    )
+    outcome = workspace.repository.complete_session(
+        session_id,
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    return workspace.repository.current(outcome.candidate_ids[0])
+
+
+def approve(workspace, pending):
+    return workspace.repository.review(
+        ReviewExperienceCommand(
+            Path("unused.json"),
+            pending.asset_id,
+            "approve",
+            replace(pending.content, confidence=0.9),
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
+
+def governed_bytes(root, managed):
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for name in managed
+        for path in (root / name).rglob("*")
+        if path.is_file()
+    }
