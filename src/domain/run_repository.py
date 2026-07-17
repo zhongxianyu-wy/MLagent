@@ -18,6 +18,7 @@ from src.domain.memory_repository import MANAGED_PATHS
 from src.domain.models import (
     CandidateCodeFile,
     CapacityStatus,
+    ExperienceCitation,
     RunPerformancePoint,
     RunRoundSnapshot,
     RunStatusSnapshot,
@@ -27,7 +28,7 @@ from src.domain.models import (
 )
 
 
-RUN_SCHEMA_VERSION = 1
+RUN_SCHEMA_VERSION = 2
 RUN_EVENT_ROOT = Path("raw-records/runs")
 RUN_ROOT = Path("runs")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
@@ -59,6 +60,7 @@ ALLOWED_EVENT_FIELDS = {
     "target_metric_value",
     "expected_round_count",
     "human_marked_rounds",
+    "experience_citations",
     "instance_id",
     "round_number",
     "parent_instance_id",
@@ -96,6 +98,7 @@ class RunStartSpec:
     target_metric_value: float
     expected_round_count: int
     human_marked_rounds: tuple[int, ...] = ()
+    experience_citations: tuple[ExperienceCitation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,7 @@ class PreparedTrainingInstance:
     hypothesis: str
     optimization_direction: str
     intended_changes: tuple[str, ...]
+    experience_citations: tuple[ExperienceCitation, ...]
 
 
 class RunRepository:
@@ -212,6 +216,9 @@ class RunRepository:
                 "target_metric_value": float(spec.target_metric_value),
                 "expected_round_count": spec.expected_round_count,
                 "human_marked_rounds": list(spec.human_marked_rounds),
+                "experience_citations": [
+                    item.to_dict() for item in spec.experience_citations
+                ],
                 "evidence_refs": [],
             },
         )
@@ -377,6 +384,7 @@ class RunRepository:
             "intended_changes": list(spec.intended_changes),
             "primary_metric_name": start["primary_metric_name"],
             "target_metric_value": start["target_metric_value"],
+            "experience_citations": start["experience_citations"],
         }
         encoded = {
             Path("input.json"): _json_bytes(input_payload),
@@ -442,6 +450,10 @@ class RunRepository:
             hypothesis=spec.hypothesis,
             optimization_direction=spec.optimization_direction,
             intended_changes=spec.intended_changes,
+            experience_citations=tuple(
+                ExperienceCitation(**item)
+                for item in start["experience_citations"]
+            ),
         )
 
     def seal_instance(
@@ -572,6 +584,10 @@ class RunRepository:
                 "model_path": model_path,
                 "error_code": result.error_code,
                 "error_summary": error_summary,
+                "experience_citations": [
+                    item.to_dict()
+                    for item in prepared.experience_citations
+                ],
                 "started_at": result.started_at,
                 "ended_at": ended_at,
                 "duration_ms": result.duration_ms,
@@ -717,6 +733,10 @@ class RunRepository:
                 started_at=payload["started_at"],
                 ended_at=payload["ended_at"],
                 duration_ms=payload["duration_ms"],
+                experience_citations=tuple(
+                    ExperienceCitation(**item)
+                    for item in payload["experience_citations"]
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise WorkspaceError(
@@ -1261,6 +1281,10 @@ class RunRepository:
                 hypothesis=payload["hypothesis"],
                 optimization_direction=payload["optimization_direction"],
                 intended_changes=tuple(payload["intended_changes"]),
+                experience_citations=tuple(
+                    ExperienceCitation(**item)
+                    for item in payload["experience_citations"]
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise WorkspaceError(
@@ -1380,6 +1404,9 @@ class RunRepository:
             "hypothesis": prepared.hypothesis,
             "optimization_direction": prepared.optimization_direction,
             "intended_changes": list(prepared.intended_changes),
+            "experience_citations": [
+                item.to_dict() for item in prepared.experience_citations
+            ],
         }
         if (
             len(started_events) != 1
@@ -1470,6 +1497,13 @@ class RunRepository:
                 type(round_number) is not int
                 or not 1 <= round_number <= spec.expected_round_count
                 for round_number in spec.human_marked_rounds
+            )
+            or len(spec.experience_citations)
+            != len(
+                {
+                    item.experience_id
+                    for item in spec.experience_citations
+                }
             )
         ):
             raise WorkspaceError(

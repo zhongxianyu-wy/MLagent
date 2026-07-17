@@ -11,6 +11,7 @@ from src.domain.memory_repository import MemoryRepository
 from src.domain.models import (
     CandidateCodeFile,
     CapacityStatus,
+    ExperienceCitation,
     TrainingExecutionResult,
     WorkspaceError,
 )
@@ -76,7 +77,7 @@ class RunWorkspace:
         self.capacity = capacity
         self.code_sha = code_sha
 
-    def start(self, run_id="run-1"):
+    def start(self, run_id="run-1", experience_citations=()):
         return self.repository.start_run(
             RunStartSpec(
                 run_id=run_id,
@@ -95,6 +96,7 @@ class RunWorkspace:
                 primary_metric_name="roc_auc",
                 target_metric_value=0.91,
                 expected_round_count=2,
+                experience_citations=experience_citations,
             ),
             actor_id="alice",
             capacity=self.capacity,
@@ -250,6 +252,48 @@ def test_completed_instance_seals_once_and_reloads_with_all_evidence(
             capacity=run_workspace.capacity,
         )
     assert caught.value.code == "training_instance_exists"
+
+
+def test_run_and_instance_freeze_included_experience_usage(run_workspace):
+    citations = (
+        ExperienceCitation(
+            "experience-trusted",
+            "experience-event-trusted",
+            "trusted",
+            "Same Dataset and metric.",
+        ),
+        ExperienceCitation(
+            "experience-pending",
+            "experience-event-pending",
+            "pending",
+            "Matching optimization direction.",
+        ),
+    )
+    run_workspace.start(experience_citations=citations)
+    start = run_workspace.repository.load_run_start("run-1")
+    prepared = run_workspace.prepare()
+    input_payload = json.loads(
+        prepared.input_path.read_text(encoding="utf-8")
+    )
+    sealed = run_workspace.repository.seal_instance(
+        prepared,
+        run_workspace.completed_result(prepared),
+        retention_reasons=("baseline",),
+        actor_id="alice",
+        capacity=run_workspace.capacity,
+    )
+    manifest = json.loads(
+        (
+            run_workspace.memory_root / sealed.asset_path
+        ).read_text(encoding="utf-8")
+    )
+
+    expected = [item.to_dict() for item in citations]
+    assert start["experience_citations"] == expected
+    assert input_payload["experience_citations"] == expected
+    assert manifest["experience_citations"] == expected
+    assert sealed.experience_citations == citations
+    assert "experience-excluded" not in json.dumps(manifest)
 
 
 def test_instance_reload_detects_changed_or_extra_evidence(run_workspace):

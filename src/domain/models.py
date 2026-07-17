@@ -719,6 +719,7 @@ class TrainingInstanceSnapshot:
     started_at: str
     ended_at: str
     duration_ms: int
+    experience_citations: tuple[ExperienceCitation, ...] = ()
     sop_source_eligible: bool = field(init=False)
 
     def __post_init__(self) -> None:
@@ -769,6 +770,12 @@ class TrainingInstanceSnapshot:
             "metrics",
             MappingProxyType(dict(self.metrics)),
         )
+        if len(self.experience_citations) != len(
+            {item.experience_id for item in self.experience_citations}
+        ):
+            raise ValueError(
+                "experience_citations must contain unique Experience IDs"
+            )
         object.__setattr__(
             self,
             "sop_source_eligible",

@@ -63,6 +63,7 @@ class TrainingRunCoordinator:
                 target_metric_value=plan.target_metric,
                 expected_round_count=len(plan.rounds),
                 human_marked_rounds=human_marked_rounds,
+                experience_citations=plan.experience_citations,
             ),
             actor_id=self.actor_id,
             capacity=self.capacity,

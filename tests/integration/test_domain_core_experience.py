@@ -10,6 +10,7 @@ from src.domain.models import (
     ApproveExplorationPlanCommand,
     BootstrapMemoryCommand,
     ConfirmDatasetCommand,
+    ExecuteExplorationCommand,
     ExperienceContent,
     ExplorationRound,
     RecordExplorationPlanCommand,
@@ -354,6 +355,85 @@ def test_review_after_plan_record_makes_experience_citation_stale(
         )
 
     assert caught.value.code == "experience_reference_stale"
+
+
+def test_actual_training_result_writes_back_only_included_experience_versions(
+    domain_experience_workspace,
+):
+    workspace = domain_experience_workspace
+    workspace.seed_experience("experience-trusted", "trusted")
+    workspace.seed_experience("experience-pending", "pending")
+    workspace.seed_experience("experience-excluded", "pending")
+    (workspace.code_root / "train.py").write_text(
+        "from sklearn.linear_model import LogisticRegression\n\n"
+        "def build_estimator(context):\n"
+        "    return LogisticRegression(\n"
+        "        random_state=context['random_seed'], max_iter=200)\n",
+        encoding="utf-8",
+    )
+    plan = workspace.core.record_exploration_plan(
+        workspace.plan_command(
+            trusted_experience_ids=("experience-trusted",),
+            pending_experience_ids=(
+                "experience-pending",
+                "experience-excluded",
+            ),
+            excluded_pending_experience_ids=("experience-excluded",),
+            experience_applicability={
+                "experience-trusted": "Same Dataset and metric.",
+                "experience-pending": "Matching optimization direction.",
+            },
+        )
+    )
+    approval = workspace.core.approve_exploration_plan(
+        ApproveExplorationPlanCommand(
+            workspace.connection,
+            workspace.code_root,
+            plan.plan_id,
+        )
+    )
+
+    status = workspace.core.execute_exploration(
+        ExecuteExplorationCommand(
+            connection_path=workspace.connection,
+            code_root=workspace.code_root,
+            dataset_id="ds-1",
+            dataset_version=1,
+            plan_id=plan.plan_id,
+            approval_id=approval.asset_id,
+            entrypoint_path="train.py",
+        )
+    )
+
+    start = next(
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (
+            workspace.memory_root
+            / "raw-records/runs"
+            / status.run_id
+        ).glob("*.json")
+        if json.loads(path.read_text(encoding="utf-8"))["event_type"]
+        == "run_started"
+    )
+    manifest = json.loads(
+        next(
+            (
+                workspace.memory_root
+                / "runs"
+                / status.run_id
+                / "instances"
+            ).glob("*/manifest.json")
+        ).read_text(encoding="utf-8")
+    )
+    expected_ids = ["experience-trusted", "experience-pending"]
+    assert [
+        item["experience_id"] for item in start["experience_citations"]
+    ] == expected_ids
+    assert [
+        item["experience_id"]
+        for item in manifest["experience_citations"]
+    ] == expected_ids
+    assert "experience-excluded" not in json.dumps(manifest)
 
 
 def write_json(path, payload):
