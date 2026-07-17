@@ -280,6 +280,17 @@ def test_recovery_required_state_requires_exact_recovery_data(updates):
         run_status_snapshot(**values)
 
 
+def test_legacy_run_recovery_exposes_close_only():
+    status = run_status_snapshot(
+        state="recovery_required",
+        ended_at=None,
+        recovery_reason="legacy_run",
+        recovery_actions=("close",),
+    )
+
+    assert status.recovery_actions == ("close",)
+
+
 @pytest.mark.parametrize(
     "updates",
     (

@@ -29,9 +29,11 @@ from src.domain.models import (
 
 
 RUN_SCHEMA_VERSION = 3
+SUPPORTED_RUN_SCHEMA_VERSIONS = frozenset({1, 2, RUN_SCHEMA_VERSION})
 RUN_EVENT_ROOT = Path("raw-records/runs")
 RUN_ROOT = Path("runs")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
+SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 SAFE_PATH_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 TERMINAL_RUN_STATES = {"completed", "failed", "timed_out", "stopped"}
 TERMINAL_INSTANCE_STATES = {"completed", "failed", "timed_out", "stopped"}
@@ -336,6 +338,16 @@ class RunRepository:
             spec.parent_instance_id,
             spec.parent_instance_fingerprint,
         )
+        planning_session_id = start.get("planning_session_id")
+        if (
+            not isinstance(planning_session_id, str)
+            or SAFE_SESSION_ID_PATTERN.fullmatch(planning_session_id) is None
+        ):
+            raise WorkspaceError(
+                code="legacy_run_not_resumable",
+                message="Run predates the required planning session binding.",
+                next_action="Start a new approved Run before training.",
+            )
         split_source = split_path.expanduser()
         if split_source.is_symlink() or not split_source.is_file():
             self._invalid_instance("frozen split is missing or symbolic")
@@ -369,7 +381,7 @@ class RunRepository:
             ],
             "plan_id": start["plan_id"],
             "plan_event_id": start["plan_event_id"],
-            "planning_session_id": start["planning_session_id"],
+            "planning_session_id": planning_session_id,
             "plan_fingerprint": start["plan_fingerprint"],
             "approval_id": start["approval_id"],
             "approval_fingerprint": start["approval_fingerprint"],
@@ -388,7 +400,7 @@ class RunRepository:
             "intended_changes": list(spec.intended_changes),
             "primary_metric_name": start["primary_metric_name"],
             "target_metric_value": start["target_metric_value"],
-            "experience_citations": start["experience_citations"],
+            "experience_citations": start.get("experience_citations", []),
         }
         encoded = {
             Path("input.json"): _json_bytes(input_payload),
@@ -456,7 +468,7 @@ class RunRepository:
             intended_changes=spec.intended_changes,
             experience_citations=tuple(
                 ExperienceCitation(**item)
-                for item in start["experience_citations"]
+                for item in start.get("experience_citations", [])
             ),
         )
 
@@ -739,7 +751,7 @@ class RunRepository:
                 duration_ms=payload["duration_ms"],
                 experience_citations=tuple(
                     ExperienceCitation(**item)
-                    for item in payload["experience_citations"]
+                    for item in payload.get("experience_citations", [])
                 ),
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -897,8 +909,14 @@ class RunRepository:
         has_pending = pending_root.is_dir() and any(pending_root.iterdir())
         if state not in TERMINAL_RUN_STATES and not self._is_active(run_id):
             state = "recovery_required"
-            recovery_reason = "unsealed_instance" if has_pending else "interrupted_run"
-            recovery_actions = ("resume", "close")
+            if self._has_planning_session(start):
+                recovery_reason = (
+                    "unsealed_instance" if has_pending else "interrupted_run"
+                )
+                recovery_actions = ("resume", "close")
+            else:
+                recovery_reason = "legacy_run"
+                recovery_actions = ("close",)
         started_at = start["created_at"]
         ended_at = (
             latest["created_at"] if latest["state"] in TERMINAL_RUN_STATES else None
@@ -1011,6 +1029,12 @@ class RunRepository:
                 code="run_already_finished",
                 message=f"Run is already sealed: {run_id}.",
                 next_action="Create a new Run instead of changing terminal history.",
+            )
+        if action == "resume" and not self._has_planning_session(events[0]):
+            raise WorkspaceError(
+                code="legacy_run_not_resumable",
+                message="Run predates the required planning session binding.",
+                next_action="Close this Run and start a new approved Run.",
             )
 
         for prepared in self._pending_instances(run_id):
@@ -1287,7 +1311,7 @@ class RunRepository:
                 intended_changes=tuple(payload["intended_changes"]),
                 experience_citations=tuple(
                     ExperienceCitation(**item)
-                    for item in payload["experience_citations"]
+                    for item in payload.get("experience_citations", [])
                 ),
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -1456,7 +1480,8 @@ class RunRepository:
             or payload.get("asset_type") != "run_event"
             or payload.get("asset_id") != event_id
             or payload.get("run_id") != run_id
-            or payload.get("schema_version") != RUN_SCHEMA_VERSION
+            or payload.get("schema_version")
+            not in SUPPORTED_RUN_SCHEMA_VERSIONS
             or payload.get("event_fingerprint")
             != self.event_fingerprint(payload)
         ):
@@ -1472,10 +1497,21 @@ class RunRepository:
             (spec.dataset_id, "Dataset ID"),
             (spec.plan_id, "plan ID"),
             (spec.plan_event_id, "plan event ID"),
-            (spec.planning_session_id, "planning session ID"),
             (spec.approval_id, "approval ID"),
         ):
             self._validate_id(value, label)
+        if (
+            not isinstance(spec.planning_session_id, str)
+            or SAFE_SESSION_ID_PATTERN.fullmatch(
+                spec.planning_session_id
+            )
+            is None
+        ):
+            raise WorkspaceError(
+                code="invalid_run_start",
+                message="Run planning session ID is invalid.",
+                next_action="Use the current Claude Code session identity.",
+            )
         for value, label in (
             (spec.dataset_content_fingerprint, "dataset content fingerprint"),
             (spec.dataset_version_fingerprint, "dataset version fingerprint"),
@@ -1491,6 +1527,7 @@ class RunRepository:
                     message=f"Run {label} is empty.",
                     next_action="Restore the approved Run binding before execution.",
                 )
+
         if (
             spec.dataset_version < 1
             or spec.expected_round_count < 1
@@ -1516,6 +1553,15 @@ class RunRepository:
                 message="Run start structure is incomplete.",
                 next_action="Use the exact approved plan and Dataset Version.",
             )
+
+    @staticmethod
+    def _has_planning_session(payload: Mapping[str, Any]) -> bool:
+        planning_session_id = payload.get("planning_session_id")
+        return (
+            isinstance(planning_session_id, str)
+            and SAFE_SESSION_ID_PATTERN.fullmatch(planning_session_id)
+            is not None
+        )
 
     @staticmethod
     def _validate_retention_reasons(reasons: tuple[str, ...]) -> None:

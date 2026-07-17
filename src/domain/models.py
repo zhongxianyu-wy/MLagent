@@ -899,9 +899,14 @@ class RunStatusSnapshot:
         _validate_non_negative(self.elapsed_ms, "elapsed_ms")
         if self.state == "recovery_required":
             _validate_non_empty(self.recovery_reason, "recovery_reason")
-            if self.recovery_actions != ("resume", "close"):
+            expected_actions = (
+                ("close",)
+                if self.recovery_reason == "legacy_run"
+                else ("resume", "close")
+            )
+            if self.recovery_actions != expected_actions:
                 raise ValueError(
-                    "recovery_actions must be exactly ('resume', 'close')"
+                    "recovery_actions do not match the recovery reason"
                 )
         elif self.recovery_reason is not None or self.recovery_actions:
             raise ValueError(

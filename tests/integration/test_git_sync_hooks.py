@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -298,21 +299,32 @@ def test_sync_hook_wrappers_fail_visible_and_nonblocking_when_python_crashes(
 
 
 def seed_hook_parent(memory: Path) -> None:
+    dataset = {
+        "asset_type": "dataset_version",
+        "asset_id": "ds-1:v1",
+        "dataset_id": "ds-1",
+        "version": 1,
+        "schema_version": 1,
+        "content_fingerprint": "ds-1-content-sha",
+        "version_fingerprint": "ds-1-version-sha",
+    }
+    dataset["manifest_fingerprint"] = payload_fingerprint(dataset)
     write_json(
         memory / "datasets/ds-1/v0001/manifest.json",
-        {
-            "asset_type": "dataset_version",
-            "asset_id": "ds-1:v1",
-            "dataset_id": "ds-1",
-        },
+        dataset,
     )
-    write_json(
+    write_sealed_run_event(
         memory / "raw-records/runs/run-1/event-start.json",
         {
             "asset_type": "run_event",
             "asset_id": "event-start",
             "run_id": "run-1",
             "event_type": "run_started",
+            "dataset_id": "ds-1",
+            "dataset_version": 1,
+            "dataset_content_fingerprint": "ds-1-content-sha",
+            "dataset_version_fingerprint": "ds-1-version-sha",
+            "planning_session_id": "session-training",
         },
     )
     write_hook_instance(
@@ -351,25 +363,39 @@ def write_hook_instance(
         {
             "run_id": "run-1",
             "instance_id": instance_id,
+            "dataset_id": "ds-1",
+            "dataset_version": 1,
             "dataset_asset_path": "datasets/ds-1/v0001/manifest.json",
+            "dataset_content_fingerprint": "ds-1-content-sha",
+            "dataset_version_fingerprint": "ds-1-version-sha",
             "planning_session_id": planning_session_id,
             "optimization_direction": "feature_filtering",
         },
     )
+    input_sha256 = hashlib.sha256(
+        (root / "input.json").read_bytes()
+    ).hexdigest()
+    manifest = {
+        "asset_type": "training_instance",
+        "asset_id": instance_id,
+        "schema_version": 3,
+        "run_id": "run-1",
+        "state": "completed",
+        "dataset_content_fingerprint": "ds-1-content-sha",
+        "dataset_version_fingerprint": "ds-1-version-sha",
+        "parent_instance_id": parent_id,
+        "primary_metric_name": "roc_auc",
+        "primary_metric_value": metric,
+        "optimization_direction": "feature_filtering",
+        "files": {"input": "input.json"},
+        "file_fingerprints": {"input": input_sha256},
+    }
+    manifest["manifest_fingerprint"] = payload_fingerprint(manifest)
     write_json(
         root / "manifest.json",
-        {
-            "asset_type": "training_instance",
-            "asset_id": instance_id,
-            "run_id": "run-1",
-            "state": "completed",
-            "parent_instance_id": parent_id,
-            "primary_metric_name": "roc_auc",
-            "primary_metric_value": metric,
-            "optimization_direction": "feature_filtering",
-        },
+        manifest,
     )
-    write_json(
+    write_sealed_run_event(
         memory / f"raw-records/runs/run-1/{event_id}.json",
         {
             "asset_type": "run_event",
@@ -380,6 +406,23 @@ def write_hook_instance(
             "instance_id": instance_id,
         },
     )
+
+
+def write_sealed_run_event(path: Path, payload: dict) -> None:
+    result = dict(payload)
+    result["schema_version"] = 3
+    result["event_fingerprint"] = payload_fingerprint(result)
+    write_json(path, result)
+
+
+def payload_fingerprint(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def write_json(path: Path, payload: dict) -> None:

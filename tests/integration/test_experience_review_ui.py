@@ -169,48 +169,105 @@ def test_experience_review_ui_renders_all_governed_state_groups(
 
 def seed_pending_experience(memory_root: Path, experience_id: str) -> None:
     evidence = []
+    run_id = f"run-{experience_id}"
+    instance_id = f"instance-{experience_id}"
+    dataset_content_fingerprint = "dataset-1-content-sha"
+    dataset_version_fingerprint = "dataset-1-version-sha"
+    training_path = (
+        memory_root
+        / f"runs/{run_id}/instances/{instance_id}/manifest.json"
+    )
+    input_path = training_path.parent / "input.json"
+    write_json(
+        input_path,
+        {
+            "run_id": run_id,
+            "instance_id": instance_id,
+            "dataset_id": "dataset-1",
+            "dataset_version": 1,
+            "planning_session_id": "session-seed",
+            "dataset_asset_path": "datasets/dataset-1/v0001/manifest.json",
+            "dataset_content_fingerprint": dataset_content_fingerprint,
+            "dataset_version_fingerprint": dataset_version_fingerprint,
+        },
+    )
+    training_payload = {
+        "asset_type": "training_instance",
+        "asset_id": instance_id,
+        "schema_version": 3,
+        "run_id": run_id,
+        "state": "completed",
+        "dataset_content_fingerprint": dataset_content_fingerprint,
+        "dataset_version_fingerprint": dataset_version_fingerprint,
+        "created_at": "2026-07-17T00:00:00Z",
+        "files": {"input": "input.json"},
+        "file_fingerprints": {
+            "input": hashlib.sha256(input_path.read_bytes()).hexdigest()
+        },
+    }
+    training_payload["manifest_fingerprint"] = fingerprint(training_payload)
+    dataset_payload = {
+        "asset_type": "dataset_version",
+        "asset_id": "dataset-1:v1",
+        "dataset_id": "dataset-1",
+        "version": 1,
+        "schema_version": 1,
+        "content_fingerprint": dataset_content_fingerprint,
+        "version_fingerprint": dataset_version_fingerprint,
+        "created_at": "2026-07-17T00:00:00Z",
+    }
+    dataset_payload["manifest_fingerprint"] = fingerprint(dataset_payload)
     evidence_specs = (
         (
             "dataset",
             "dataset-1:v1",
             memory_root / "datasets/dataset-1/v0001/manifest.json",
-            {
-                "asset_type": "dataset_version",
-                "asset_id": "dataset-1:v1",
-                "dataset_id": "dataset-1",
-            },
+            dataset_payload,
         ),
         (
             "run",
-            "run-1",
-            memory_root / "raw-records/evidence/run-1-event-start.json",
-            {
-                "asset_type": "run_event",
-                "asset_id": "event-start",
-                "run_id": "run-1",
-                "event_type": "run_started",
-            },
+            run_id,
+            memory_root / f"raw-records/evidence/{run_id}-event-start.json",
+            sealed_run_event(
+                {
+                    "asset_type": "run_event",
+                    "asset_id": f"event-start-{experience_id}",
+                    "run_id": run_id,
+                    "event_type": "run_started",
+                    "dataset_id": "dataset-1",
+                    "dataset_version": 1,
+                    "dataset_content_fingerprint": (
+                        dataset_content_fingerprint
+                    ),
+                    "dataset_version_fingerprint": (
+                        dataset_version_fingerprint
+                    ),
+                    "planning_session_id": "session-seed",
+                    "created_at": "2026-07-17T00:00:00Z",
+                }
+            ),
         ),
         (
             "training_instance",
-            "instance-1",
-            memory_root / "runs/run-1/instances/instance-1/manifest.json",
-            {
-                "asset_type": "training_instance",
-                "asset_id": "instance-1",
-                "run_id": "run-1",
-            },
+            instance_id,
+            training_path,
+            training_payload,
         ),
         (
             "raw_record",
-            "event-completed",
-            memory_root / "raw-records/evidence/run-1-event-completed.json",
-            {
-                "asset_type": "run_event",
-                "asset_id": "event-completed",
-                "run_id": "run-1",
-                "event_type": "instance_completed",
-            },
+            f"event-completed-{experience_id}",
+            memory_root
+            / f"raw-records/evidence/{run_id}-event-completed.json",
+            sealed_run_event(
+                {
+                    "asset_type": "run_event",
+                    "asset_id": f"event-completed-{experience_id}",
+                    "run_id": run_id,
+                    "event_type": "instance_completed",
+                    "instance_id": instance_id,
+                    "created_at": "2026-07-17T00:00:00Z",
+                }
+            ),
         ),
     )
     for role, asset_id, path, payload in evidence_specs:
@@ -235,7 +292,7 @@ def seed_pending_experience(memory_root: Path, experience_id: str) -> None:
             "asset_type": "experience_event",
             "asset_id": event_id,
             "experience_id": experience_id,
-            "schema_version": 1,
+            "schema_version": 2,
             "previous_event_id": None,
             "previous_event_fingerprint": None,
             "state": "pending",
@@ -258,13 +315,7 @@ def seed_pending_experience(memory_root: Path, experience_id: str) -> None:
             "reviewed_by": None,
             "decision": None,
         }
-    payload["event_fingerprint"] = hashlib.sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    payload["event_fingerprint"] = fingerprint(payload)
     write_json(
         memory_root / "experiences" / experience_id / f"{event_id}.json",
         payload,
@@ -281,6 +332,23 @@ def write_json(path: Path, payload: dict) -> None:
 
 def find_button(app, label):
     return next(button for button in app.button if button.label == label)
+
+
+def fingerprint(payload):
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def sealed_run_event(payload):
+    result = dict(payload)
+    result["schema_version"] = 3
+    result["event_fingerprint"] = fingerprint(result)
+    return result
 
 
 def review(core, connection_path, experience_id, decision, related=None):

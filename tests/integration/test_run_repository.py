@@ -77,7 +77,12 @@ class RunWorkspace:
         self.capacity = capacity
         self.code_sha = code_sha
 
-    def start(self, run_id="run-1", experience_citations=()):
+    def start(
+        self,
+        run_id="run-1",
+        experience_citations=(),
+        planning_session_id="session-1",
+    ):
         return self.repository.start_run(
             RunStartSpec(
                 run_id=run_id,
@@ -87,7 +92,7 @@ class RunWorkspace:
                 dataset_version_fingerprint="dataset-version-sha",
                 plan_id="plan-1",
                 plan_event_id="plan-event-1",
-                planning_session_id="session-1",
+                planning_session_id=planning_session_id,
                 plan_fingerprint="plan-sha",
                 approval_id="approval-1",
                 approval_fingerprint="approval-sha",
@@ -191,12 +196,71 @@ def test_run_events_are_append_only_causal_and_minimal(run_workspace):
     assert events == (started, stopped)
     assert stopped.previous_event_id == started.asset_id
     payload = json.loads(
-        (run_workspace.memory_root / stopped.asset_path).read_text(encoding="utf-8")
+        (run_workspace.memory_root / stopped.asset_path).read_text(
+            encoding="utf-8"
+        )
     )
     assert set(payload) <= ALLOWED_EVENT_FIELDS
     assert set(payload).isdisjoint(
         {"prompt", "conversation", "stdout", "stderr", "stack_trace"}
     )
+
+
+def test_run_accepts_numeric_claude_session_identity(run_workspace):
+    started = run_workspace.start(planning_session_id="1-session-uuid")
+
+    payload = run_workspace.repository.load_run_start(started.run_id)
+
+    assert payload["planning_session_id"] == "1-session-uuid"
+
+
+@pytest.mark.parametrize("legacy_schema", (1, 2))
+def test_run_reader_preserves_legacy_event_schema(
+    run_workspace,
+    legacy_schema,
+):
+    started = run_workspace.start()
+    path = run_workspace.memory_root / started.asset_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = legacy_schema
+    payload["event_fingerprint"] = RunRepository.event_fingerprint(payload)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = run_workspace.repository.load_run_start("run-1")
+
+    assert loaded["schema_version"] == legacy_schema
+
+
+def test_legacy_run_without_planning_session_can_close_but_not_resume(
+    run_workspace,
+):
+    started = run_workspace.start()
+    path = run_workspace.memory_root / started.asset_path
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    payload.pop("planning_session_id")
+    payload.pop("experience_citations")
+    payload["event_fingerprint"] = RunRepository.event_fingerprint(payload)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    status = run_workspace.repository.status("run-1")
+    before = run_workspace.repository.list_events("run-1")
+
+    assert status.recovery_actions == ("close",)
+    with pytest.raises(WorkspaceError, match="planning session"):
+        run_workspace.repository.recover_run(
+            "run-1",
+            action="resume",
+            actor_id="alice",
+            capacity=run_workspace.capacity,
+        )
+    assert run_workspace.repository.list_events("run-1") == before
 
 
 def test_code_revision_freezes_exact_approved_files(run_workspace):

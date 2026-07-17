@@ -32,16 +32,23 @@ class ExperienceWorkspace:
         self.write_dataset()
 
     def write_dataset(self, dataset_id="dataset-1"):
+        payload = {
+            "asset_type": "dataset_version",
+            "asset_id": f"{dataset_id}:v1",
+            "dataset_id": dataset_id,
+            "version": 1,
+            "schema_version": 1,
+            "content_fingerprint": f"{dataset_id}-content-sha",
+            "version_fingerprint": f"{dataset_id}-version-sha",
+            "primary_metric": "roc_auc",
+            "created_at": "2026-07-17T00:00:00Z",
+        }
+        payload["manifest_fingerprint"] = governed_payload_fingerprint(
+            payload
+        )
         self.write_json(
             f"datasets/{dataset_id}/v0001/manifest.json",
-            {
-                "asset_type": "dataset_version",
-                "asset_id": f"{dataset_id}:v1",
-                "dataset_id": dataset_id,
-                "version": 1,
-                "primary_metric": "roc_auc",
-                "created_at": "2026-07-17T00:00:00Z",
-            },
+            payload,
         )
 
     def seed_instance(
@@ -57,30 +64,47 @@ class ExperienceWorkspace:
         planning_session_id="session-historical",
         dataset_id="dataset-1",
     ):
-        run_id = "run-1"
+        run_id = f"run-{planning_session_id}"
         event_prefix = instance_id.replace("instance-", "event-")
-        if not (self.root / "raw-records/runs/run-1/event-run-start.json").exists():
-            self.write_json(
-                "raw-records/runs/run-1/event-run-start.json",
+        start_event_id = f"event-{run_id}-start"
+        if not (
+            self.root / f"raw-records/runs/{run_id}/{start_event_id}.json"
+        ).exists():
+            write_sealed_run_event(
+                self.root
+                / f"raw-records/runs/{run_id}/{start_event_id}.json",
                 {
                     "asset_type": "run_event",
-                    "asset_id": "event-run-start",
+                    "asset_id": start_event_id,
                     "run_id": run_id,
                     "event_type": "run_started",
                     "state": "running",
+                    "dataset_id": dataset_id,
+                    "dataset_version": 1,
+                    "dataset_content_fingerprint": (
+                        f"{dataset_id}-content-sha"
+                    ),
+                    "dataset_version_fingerprint": (
+                        f"{dataset_id}-version-sha"
+                    ),
                     "planning_session_id": planning_session_id,
                     "created_at": "2026-07-17T00:00:00Z",
                 },
             )
         instance_root = f"runs/{run_id}/instances/{instance_id}"
+        input_relative = f"{instance_root}/input.json"
         self.write_json(
-            f"{instance_root}/input.json",
+            input_relative,
             {
                 "run_id": run_id,
                 "instance_id": instance_id,
+                "dataset_id": dataset_id,
+                "dataset_version": 1,
                 "dataset_asset_path": (
                     f"datasets/{dataset_id}/v0001/manifest.json"
                 ),
+                "dataset_content_fingerprint": f"{dataset_id}-content-sha",
+                "dataset_version_fingerprint": f"{dataset_id}-version-sha",
                 "planning_session_id": planning_session_id,
                 "hypothesis": f"Evaluate {direction}",
                 "optimization_direction": direction,
@@ -91,6 +115,8 @@ class ExperienceWorkspace:
             "asset_type": "training_instance",
             "asset_id": instance_id,
             "run_id": run_id,
+            "dataset_content_fingerprint": f"{dataset_id}-content-sha",
+            "dataset_version_fingerprint": f"{dataset_id}-version-sha",
             "round_number": 1 if parent_id is None else 2,
             "state": state,
             "parent_instance_id": parent_id,
@@ -100,10 +126,20 @@ class ExperienceWorkspace:
             "error_summary": error_summary,
             "optimization_direction": direction,
             "created_at": self.clock_value,
+            "schema_version": 3,
+            "files": {"input": "input.json"},
+            "file_fingerprints": {
+                "input": hashlib.sha256(
+                    (self.root / input_relative).read_bytes()
+                ).hexdigest()
+            },
         }
+        manifest["manifest_fingerprint"] = governed_payload_fingerprint(
+            manifest
+        )
         self.write_json(f"{instance_root}/manifest.json", manifest)
-        self.write_json(
-            f"raw-records/runs/{run_id}/{event_prefix}.json",
+        write_sealed_run_event(
+            self.root / f"raw-records/runs/{run_id}/{event_prefix}.json",
             {
                 "asset_type": "run_event",
                 "asset_id": event_prefix,
@@ -128,7 +164,11 @@ def test_session_boundary_extracts_only_new_metric_improvement(
     experience_workspace,
 ):
     workspace = experience_workspace
-    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.seed_instance(
+        "instance-old",
+        metric=0.7,
+        planning_session_id="session-1",
+    )
     started = workspace.repository.start_session(
         "session-1",
         actor_id="alice",
@@ -153,6 +193,10 @@ def test_session_boundary_extracts_only_new_metric_improvement(
     assert outcome.new_instance_ids == ("instance-new",)
     assert "instance-old" not in outcome.new_instance_ids
     candidate = workspace.repository.current(outcome.candidate_ids[0])
+    candidate_payload = json.loads(
+        (workspace.root / candidate.asset_path).read_text(encoding="utf-8")
+    )
+    assert candidate_payload["schema_version"] == 2
     assert candidate.state == "pending"
     assert candidate.source_kind == "metric_improvement"
     assert "roc_auc" in candidate.content.conclusion
@@ -169,11 +213,50 @@ def test_session_boundary_extracts_only_new_metric_improvement(
         assert item.sha256 == hashlib.sha256(raw).hexdigest()
 
 
+def test_extraction_accepts_unicode_in_governed_training_evidence(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        direction="特征筛选",
+        planning_session_id="session-unicode",
+    )
+    workspace.repository.start_session(
+        "session-unicode",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-child",
+        metric=0.8,
+        parent_id="instance-parent",
+        direction="特征筛选",
+        planning_session_id="session-unicode",
+    )
+
+    outcome = workspace.repository.complete_session(
+        "session-unicode",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+
+    assert outcome.outcome == "created"
+    assert "特征筛选" in workspace.repository.current(
+        outcome.candidate_ids[0]
+    ).content.conclusion
+
+
 def test_empty_session_records_no_op_without_creating_experience(
     experience_workspace,
 ):
     workspace = experience_workspace
-    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.seed_instance(
+        "instance-old",
+        metric=0.7,
+        planning_session_id="session-empty",
+    )
     workspace.repository.start_session(
         "session-empty",
         actor_id="alice",
@@ -202,7 +285,11 @@ def test_repeated_stop_reuses_prior_outcome_without_new_files(
     experience_workspace,
 ):
     workspace = experience_workspace
-    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.seed_instance(
+        "instance-old",
+        metric=0.7,
+        planning_session_id="session-1",
+    )
     workspace.repository.start_session(
         "session-1",
         actor_id="alice",
@@ -243,7 +330,11 @@ def test_stop_retry_reuses_candidate_written_before_interruption(
     monkeypatch,
 ):
     workspace = experience_workspace
-    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.seed_instance(
+        "instance-old",
+        metric=0.7,
+        planning_session_id="session-retry",
+    )
     workspace.repository.start_session(
         "session-retry",
         actor_id="alice",
@@ -307,7 +398,11 @@ def test_concurrent_session_does_not_extract_another_sessions_instance(
     experience_workspace,
 ):
     workspace = experience_workspace
-    workspace.seed_instance("instance-parent", metric=0.7)
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        planning_session_id="session-a",
+    )
     workspace.repository.start_session(
         "session-a",
         actor_id="alice",
@@ -341,9 +436,186 @@ def test_concurrent_session_does_not_extract_another_sessions_instance(
     assert len(owned.candidate_ids) == 1
 
 
+def test_session_ownership_rejects_tampered_frozen_instance_input(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        planning_session_id="session-a",
+    )
+    workspace.repository.start_session(
+        "session-a",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-b",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id="session-b",
+    )
+    input_path = (
+        workspace.root
+        / "runs/run-session-b/instances/instance-b/input.json"
+    )
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    payload["planning_session_id"] = "session-a"
+    input_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.complete_session(
+            "session-a",
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert not any((workspace.root / "experiences").rglob("*.json"))
+
+
+def test_stop_preflights_session_lineage_before_writing_any_assets(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        planning_session_id="session-preflight",
+    )
+    workspace.repository.start_session(
+        "session-preflight",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-child",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id="session-preflight",
+    )
+    run_start = (
+        workspace.root
+        / "raw-records/runs/run-session-preflight/"
+        "event-run-session-preflight-start.json"
+    )
+    payload = json.loads(run_start.read_text(encoding="utf-8"))
+    payload["planning_session_id"] = "another-session"
+    write_sealed_run_event(run_start, payload)
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.complete_session(
+            "session-preflight",
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert not any((workspace.root / "experiences").rglob("*.json"))
+    assert not (
+        workspace.root
+        / "raw-records/sessions/session-preflight/stop.json"
+    ).exists()
+
+
+def test_stop_rejects_tampered_run_start_fingerprint_before_writing(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        planning_session_id="session-run-seal",
+    )
+    workspace.repository.start_session(
+        "session-run-seal",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-child",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id="session-run-seal",
+    )
+    run_start = (
+        workspace.root
+        / "raw-records/runs/run-session-run-seal/"
+        "event-run-session-run-seal-start.json"
+    )
+    payload = json.loads(run_start.read_text(encoding="utf-8"))
+    payload["dataset_version"] = 2
+    workspace.write_json(
+        run_start.relative_to(workspace.root).as_posix(),
+        payload,
+    )
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.complete_session(
+            "session-run-seal",
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert not any((workspace.root / "experiences").rglob("*.json"))
+    assert not (
+        workspace.root
+        / "raw-records/sessions/session-run-seal/stop.json"
+    ).exists()
+
+
+def test_stop_rejects_dataset_version_mismatch_before_writing(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance(
+        "instance-parent",
+        metric=0.7,
+        planning_session_id="session-dataset-lineage",
+    )
+    workspace.repository.start_session(
+        "session-dataset-lineage",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-child",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id="session-dataset-lineage",
+    )
+    run_start = (
+        workspace.root
+        / "raw-records/runs/run-session-dataset-lineage/"
+        "event-run-session-dataset-lineage-start.json"
+    )
+    payload = json.loads(run_start.read_text(encoding="utf-8"))
+    payload["dataset_version"] = 2
+    write_sealed_run_event(run_start, payload)
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.complete_session(
+            "session-dataset-lineage",
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert not any((workspace.root / "experiences").rglob("*.json"))
+    assert not (
+        workspace.root
+        / "raw-records/sessions/session-dataset-lineage/stop.json"
+    ).exists()
+
+
 def test_failed_child_creates_bounded_failure_experience(experience_workspace):
     workspace = experience_workspace
-    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.seed_instance(
+        "instance-old",
+        metric=0.7,
+        planning_session_id="session-failure",
+    )
     workspace.repository.start_session(
         "session-failure",
         actor_id="alice",
@@ -776,6 +1048,43 @@ def test_evidence_role_must_match_the_cited_asset_identity(
         workspace.repository.current(pending.asset_id)
 
 
+def test_direct_evidence_assets_must_form_one_run_instance_chain(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    first = create_pending(
+        workspace,
+        "session-chain-first",
+        "instance-chain-first",
+    )
+    second = create_pending(
+        workspace,
+        "session-chain-second",
+        "instance-chain-second",
+    )
+    first_path = workspace.root / first.asset_path
+    first_payload = json.loads(first_path.read_text(encoding="utf-8"))
+    second_payload = json.loads(
+        (workspace.root / second.asset_path).read_text(encoding="utf-8")
+    )
+    first_payload["evidence"] = [
+        (
+            next(
+                item
+                for item in second_payload["evidence"]
+                if item["role"] == "raw_record"
+            )
+            if item["role"] == "raw_record"
+            else item
+        )
+        for item in first_payload["evidence"]
+    ]
+    write_sealed_event(first_path, first_payload)
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.current(first.asset_id)
+
+
 def test_history_rejects_a_linear_but_illegal_state_transition(
     experience_workspace,
 ):
@@ -923,10 +1232,18 @@ def create_pending(
     dataset_id="dataset-1",
 ):
     if not (
-        workspace.root
-        / f"runs/run-1/instances/{parent_id}/manifest.json"
-    ).exists():
-        workspace.seed_instance(parent_id, metric=parent_metric)
+        tuple(
+            workspace.root.glob(
+                f"runs/*/instances/{parent_id}/manifest.json"
+            )
+        )
+    ):
+        workspace.seed_instance(
+            parent_id,
+            metric=parent_metric,
+            planning_session_id=session_id,
+            dataset_id=dataset_id,
+        )
     workspace.repository.start_session(
         session_id,
         actor_id="alice",
@@ -972,15 +1289,42 @@ def governed_bytes(root, managed):
 def write_sealed_event(path, payload):
     canonical = dict(payload)
     canonical.pop("event_fingerprint", None)
-    payload["event_fingerprint"] = hashlib.sha256(
-        json.dumps(
-            canonical,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    payload["event_fingerprint"] = payload_fingerprint(canonical)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def write_sealed_run_event(path, payload):
+    canonical = dict(payload)
+    canonical.pop("event_fingerprint", None)
+    canonical["schema_version"] = 3
+    canonical["event_fingerprint"] = governed_payload_fingerprint(canonical)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(canonical, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def payload_fingerprint(payload):
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def governed_payload_fingerprint(payload):
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()

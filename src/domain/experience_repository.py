@@ -24,7 +24,7 @@ from src.domain.models import (
 )
 
 
-EXPERIENCE_SCHEMA_VERSION = 1
+EXPERIENCE_SCHEMA_VERSION = 2
 EXPERIENCE_ROOT = Path("experiences")
 SESSION_ROOT = Path("raw-records/sessions")
 RUN_EVENT_ROOT = Path("raw-records/runs")
@@ -135,19 +135,22 @@ class ExperienceRepository:
             new_instance_ids = tuple(
                 sorted(set(instances) - set(start["baseline_instance_ids"]))
             )
-            candidate_ids = []
+            prepared_candidates = []
             for instance_id in new_instance_ids:
-                candidate = self._extract_candidate(
+                candidate = self._build_candidate(
                     session_id,
                     instance_id,
                     new_event_ids,
                     events,
                     instances,
                     actor_id,
-                    capacity,
                 )
                 if candidate is not None:
-                    candidate_ids.append(candidate.asset_id)
+                    prepared_candidates.append(candidate)
+            candidate_ids = [
+                self._publish_candidate(relative, candidate, capacity).asset_id
+                for relative, candidate in prepared_candidates
+            ]
             outcome = "created" if candidate_ids else "no_op"
             payload = {
                 "asset_type": "experience_session_stop",
@@ -442,7 +445,7 @@ class ExperienceRepository:
     def pending_count(self) -> int:
         return len(self.list_current(("pending",)))
 
-    def _extract_candidate(
+    def _build_candidate(
         self,
         session_id: str,
         instance_id: str,
@@ -450,8 +453,7 @@ class ExperienceRepository:
         events: dict[str, tuple[Path, dict[str, Any]]],
         instances: dict[str, tuple[Path, dict[str, Any]]],
         actor_id: str,
-        capacity: CapacityStatus,
-    ) -> ExperienceSnapshot | None:
+    ) -> tuple[Path, dict[str, Any]] | None:
         manifest_path, manifest = instances[instance_id]
         input_payload = self._instance_input(manifest_path)
         if input_payload.get("planning_session_id") != session_id:
@@ -606,23 +608,36 @@ class ExperienceRepository:
         }
         payload["event_fingerprint"] = _fingerprint(payload)
         relative = EXPERIENCE_ROOT / experience_id / f"{event_id}.json"
+        snapshot = self._snapshot(payload, relative)
+        self._validate_snapshot_evidence(snapshot)
+        return relative, payload
+
+    def _publish_candidate(
+        self,
+        relative: Path,
+        payload: dict[str, Any],
+        capacity: CapacityStatus,
+    ) -> ExperienceSnapshot:
+        experience_id = payload["experience_id"]
+        session_id = payload["extraction_session_id"]
+        snapshot = self._snapshot(payload, relative)
+        self._validate_snapshot_evidence(snapshot)
         target = self.repository_path / relative
         if target.exists():
             existing = self._load_experience(target, experience_id)
-            expected = self._snapshot(payload, relative)
             if (
-                existing.event_id != expected.event_id
+                existing.event_id != snapshot.event_id
                 or existing.state != "pending"
-                or existing.content != expected.content
-                or existing.evidence != expected.evidence
+                or existing.content != snapshot.content
+                or existing.evidence != snapshot.evidence
                 or existing.extraction_session_id != session_id
-                or existing.source_kind != expected.source_kind
-                or existing.created_by != actor_id
+                or existing.source_kind != snapshot.source_kind
+                or existing.created_by != snapshot.created_by
             ):
                 self._invalid_experience(experience_id)
             return existing
         self._write_new(relative, payload, capacity)
-        return self._snapshot(payload, relative)
+        return snapshot
 
     def _terminal_event(
         self,
@@ -654,10 +669,37 @@ class ExperienceRepository:
         return matches[0] if len(matches) == 1 else None
 
     def _instance_input(self, manifest_path: Path) -> dict[str, Any]:
-        return self._load_json(
-            manifest_path.parent / "input.json",
+        manifest = self._load_json(
+            manifest_path,
             "invalid_experience_evidence",
         )
+        canonical = dict(manifest)
+        manifest_fingerprint = canonical.pop("manifest_fingerprint", None)
+        files = manifest.get("files")
+        fingerprints = manifest.get("file_fingerprints")
+        input_path = manifest_path.parent / "input.json"
+        if (
+            manifest.get("asset_type") != "training_instance"
+            or manifest.get("schema_version") not in {1, 2, 3}
+            or manifest_fingerprint != _governed_fingerprint(canonical)
+            or not isinstance(files, dict)
+            or files.get("input") != "input.json"
+            or not isinstance(fingerprints, dict)
+            or not input_path.is_file()
+            or fingerprints.get("input")
+            != hashlib.sha256(input_path.read_bytes()).hexdigest()
+        ):
+            self._invalid_evidence(manifest_path)
+        payload = self._load_json(
+            input_path,
+            "invalid_experience_evidence",
+        )
+        if (
+            payload.get("run_id") != manifest.get("run_id")
+            or payload.get("instance_id") != manifest.get("asset_id")
+        ):
+            self._invalid_evidence(input_path)
+        return payload
 
     def _evidence(
         self,
@@ -800,6 +842,17 @@ class ExperienceRepository:
             payload,
             path.relative_to(self.repository_path),
         )
+        self._validate_snapshot_evidence(snapshot)
+        return snapshot
+
+    def _validate_snapshot_evidence(
+        self,
+        snapshot: ExperienceSnapshot,
+    ) -> None:
+        evidence_payloads: dict[
+            str,
+            tuple[ExperienceEvidence, Path, dict[str, Any]],
+        ] = {}
         for item in snapshot.evidence:
             evidence_path = self.repository_path / item.asset_path
             self._validate_path(evidence_path)
@@ -809,14 +862,18 @@ class ExperienceRepository:
                 != item.sha256
             ):
                 self._invalid_evidence(evidence_path)
-            self._validate_evidence_identity(item, evidence_path)
-        return snapshot
+            evidence_payloads[item.role] = (
+                item,
+                evidence_path,
+                self._validate_evidence_identity(item, evidence_path),
+            )
+        self._validate_evidence_coherence(snapshot, evidence_payloads)
 
     def _validate_evidence_identity(
         self,
         evidence: ExperienceEvidence,
         evidence_path: Path,
-    ) -> None:
+    ) -> dict[str, Any]:
         relative = evidence_path.relative_to(self.repository_path)
         expected_root = EVIDENCE_PATH_ROOTS[evidence.role]
         if relative.parts[: len(expected_root)] != expected_root:
@@ -827,17 +884,31 @@ class ExperienceRepository:
         )
         valid = False
         if evidence.role == "dataset":
+            canonical = dict(payload)
+            manifest_fingerprint = canonical.pop(
+                "manifest_fingerprint",
+                None,
+            )
             valid = (
                 payload.get("asset_type") == "dataset_version"
                 and payload.get("asset_id") == evidence.asset_id
                 and isinstance(payload.get("dataset_id"), str)
                 and bool(payload["dataset_id"].strip())
+                and type(payload.get("version")) is int
+                and payload["version"] > 0
+                and isinstance(payload.get("content_fingerprint"), str)
+                and bool(payload["content_fingerprint"].strip())
+                and isinstance(payload.get("version_fingerprint"), str)
+                and bool(payload["version_fingerprint"].strip())
+                and manifest_fingerprint
+                == _governed_fingerprint(canonical)
             )
         elif evidence.role == "run":
             valid = (
                 payload.get("asset_type") == "run_event"
                 and payload.get("event_type") == "run_started"
                 and payload.get("run_id") == evidence.asset_id
+                and self._valid_run_event_fingerprint(payload)
             )
         elif evidence.role == "training_instance":
             valid = (
@@ -848,11 +919,81 @@ class ExperienceRepository:
             valid = (
                 payload.get("asset_type") == "run_event"
                 and payload.get("asset_id") == evidence.asset_id
+                and isinstance(payload.get("instance_id"), str)
+                and bool(payload["instance_id"].strip())
                 and payload.get("event_type")
                 in {"instance_completed", "instance_failed"}
+                and self._valid_run_event_fingerprint(payload)
             )
         if not valid:
             self._invalid_evidence(evidence_path)
+        return payload
+
+    def _validate_evidence_coherence(
+        self,
+        snapshot: ExperienceSnapshot,
+        evidence_payloads: dict[
+            str,
+            tuple[ExperienceEvidence, Path, dict[str, Any]],
+        ],
+    ) -> None:
+        dataset_item, _, dataset = evidence_payloads["dataset"]
+        run_item, _, run = evidence_payloads["run"]
+        instance_item, instance_path, instance = evidence_payloads[
+            "training_instance"
+        ]
+        _, raw_path, raw_record = evidence_payloads["raw_record"]
+        input_payload = self._instance_input(instance_path)
+
+        run_id = run_item.asset_id
+        instance_id = instance_item.asset_id
+        planning_session_id = run.get("planning_session_id")
+        dataset_path = input_payload.get("dataset_asset_path")
+        dataset_id = dataset.get("dataset_id")
+        dataset_version = dataset.get("version")
+        dataset_content_fingerprint = dataset.get("content_fingerprint")
+        dataset_version_fingerprint = dataset.get("version_fingerprint")
+        expected_terminal_event = f"instance_{instance.get('state')}"
+        if (
+            instance.get("run_id") != run_id
+            or raw_record.get("run_id") != run_id
+            or raw_record.get("instance_id") != instance_id
+            or input_payload.get("run_id") != run_id
+            or input_payload.get("instance_id") != instance_id
+            or not isinstance(planning_session_id, str)
+            or not planning_session_id.strip()
+            or input_payload.get("planning_session_id")
+            != planning_session_id
+            or snapshot.extraction_session_id != planning_session_id
+            or dataset_path != dataset_item.asset_path
+            or run.get("dataset_id") != dataset_id
+            or run.get("dataset_version") != dataset_version
+            or run.get("dataset_content_fingerprint")
+            != dataset_content_fingerprint
+            or run.get("dataset_version_fingerprint")
+            != dataset_version_fingerprint
+            or input_payload.get("dataset_id") != dataset_id
+            or input_payload.get("dataset_version") != dataset_version
+            or input_payload.get("dataset_content_fingerprint")
+            != dataset_content_fingerprint
+            or input_payload.get("dataset_version_fingerprint")
+            != dataset_version_fingerprint
+            or instance.get("dataset_content_fingerprint")
+            != dataset_content_fingerprint
+            or instance.get("dataset_version_fingerprint")
+            != dataset_version_fingerprint
+            or raw_record.get("event_type") != expected_terminal_event
+        ):
+            self._invalid_evidence(raw_path)
+
+    @staticmethod
+    def _valid_run_event_fingerprint(payload: dict[str, Any]) -> bool:
+        canonical = dict(payload)
+        event_fingerprint = canonical.pop("event_fingerprint", None)
+        return (
+            payload.get("schema_version") in {1, 2, 3}
+            and event_fingerprint == _governed_fingerprint(canonical)
+        )
 
     @staticmethod
     def _snapshot(
@@ -1043,6 +1184,17 @@ def _fingerprint(payload: Any) -> str:
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _governed_fingerprint(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
 

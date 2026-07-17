@@ -91,9 +91,10 @@ class DomainExperienceWorkspace:
         dataset_path = next(
             self.memory_root.glob("datasets/ds-1/v0001/manifest.json")
         )
-        dataset_asset_id = json.loads(
+        dataset_payload = json.loads(
             dataset_path.read_text(encoding="utf-8")
-        )["asset_id"]
+        )
+        dataset_asset_id = dataset_payload["asset_id"]
         evidence_specs = [
             ("dataset", dataset_asset_id, dataset_path),
             (
@@ -117,21 +118,77 @@ class DomainExperienceWorkspace:
         ]
         for role, asset_id, path in evidence_specs[1:]:
             if role == "run":
-                payload = {
-                    "asset_type": "run_event",
-                    "asset_id": f"event-start-{experience_id}",
-                    "run_id": asset_id,
-                    "event_type": "run_started",
-                    "created_at": "2026-07-17T00:00:00Z",
-                }
+                payload = sealed_run_event(
+                    {
+                        "asset_type": "run_event",
+                        "asset_id": f"event-start-{experience_id}",
+                        "run_id": asset_id,
+                        "event_type": "run_started",
+                        "dataset_id": "ds-1",
+                        "dataset_version": dataset_payload["version"],
+                        "dataset_content_fingerprint": dataset_payload[
+                            "content_fingerprint"
+                        ],
+                        "dataset_version_fingerprint": dataset_payload[
+                            "version_fingerprint"
+                        ],
+                        "planning_session_id": "session-seed",
+                        "created_at": "2026-07-17T00:00:00Z",
+                    }
+                )
             elif role == "raw_record":
+                payload = sealed_run_event(
+                    {
+                        "asset_type": "run_event",
+                        "asset_id": asset_id,
+                        "run_id": f"run-{experience_id}",
+                        "event_type": "instance_completed",
+                        "instance_id": f"instance-{experience_id}",
+                        "created_at": "2026-07-17T00:00:00Z",
+                    }
+                )
+            elif role == "training_instance":
+                input_path = path.parent / "input.json"
+                write_json(
+                    input_path,
+                    {
+                        "run_id": f"run-{experience_id}",
+                        "instance_id": asset_id,
+                        "dataset_id": "ds-1",
+                        "dataset_version": dataset_payload["version"],
+                        "planning_session_id": "session-seed",
+                        "dataset_asset_path": dataset_path.relative_to(
+                            self.memory_root
+                        ).as_posix(),
+                        "dataset_content_fingerprint": dataset_payload[
+                            "content_fingerprint"
+                        ],
+                        "dataset_version_fingerprint": dataset_payload[
+                            "version_fingerprint"
+                        ],
+                    },
+                )
                 payload = {
-                    "asset_type": "run_event",
+                    "asset_type": "training_instance",
                     "asset_id": asset_id,
+                    "schema_version": 3,
                     "run_id": f"run-{experience_id}",
-                    "event_type": "instance_completed",
+                    "state": "completed",
+                    "dataset_content_fingerprint": dataset_payload[
+                        "content_fingerprint"
+                    ],
+                    "dataset_version_fingerprint": dataset_payload[
+                        "version_fingerprint"
+                    ],
+                    "files": {"input": "input.json"},
+                    "file_fingerprints": {
+                        "input": hashlib.sha256(
+                            input_path.read_bytes()
+                        ).hexdigest()
+                    },
                     "created_at": "2026-07-17T00:00:00Z",
                 }
+                payload["manifest_fingerprint"] = fingerprint(payload)
             else:
                 payload = {
                     "asset_type": role,
@@ -165,7 +222,7 @@ class DomainExperienceWorkspace:
                 "asset_type": "experience_event",
                 "asset_id": pending_event,
                 "experience_id": experience_id,
-                "schema_version": 1,
+                "schema_version": 2,
                 "previous_event_id": None,
                 "previous_event_fingerprint": None,
                 "state": "pending",
@@ -193,7 +250,7 @@ class DomainExperienceWorkspace:
                 "asset_type": "experience_event",
                 "asset_id": trusted_event,
                 "experience_id": experience_id,
-                "schema_version": 1,
+                "schema_version": 2,
                 "previous_event_id": pending_event,
                 "previous_event_fingerprint": pending_payload[
                     "event_fingerprint"
@@ -469,11 +526,22 @@ def write_json(path, payload):
 
 
 def write_experience_event(path, payload):
-    payload["event_fingerprint"] = hashlib.sha256(
+    payload["event_fingerprint"] = fingerprint(payload)
+    write_json(path, payload)
+
+
+def sealed_run_event(payload):
+    result = dict(payload)
+    result["schema_version"] = 3
+    result["event_fingerprint"] = fingerprint(result)
+    return result
+
+
+def fingerprint(payload):
+    return hashlib.sha256(
         json.dumps(
             payload,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    write_json(path, payload)
