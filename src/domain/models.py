@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -342,6 +343,256 @@ class SessionStopSyncCommand:
 
     def __post_init__(self) -> None:
         _validate_non_empty(self.session_id, "session_id")
+
+
+@dataclass(frozen=True)
+class CompleteSessionCommand:
+    connection_path: Path
+    session_id: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.session_id, "session_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExperienceContent:
+    conclusion: str
+    applicability: str
+    recommended_action: str
+    failure_boundary: str
+    risk: str
+    confidence: float
+
+    def __post_init__(self) -> None:
+        for field_name in _EXPERIENCE_CONTENT_FIELDS:
+            value = getattr(self, field_name)
+            _validate_non_empty(value, field_name)
+            if len(value) > _MAX_EXPERIENCE_TEXT_LENGTH:
+                raise ValueError(
+                    f"{field_name} must be at most "
+                    f"{_MAX_EXPERIENCE_TEXT_LENGTH} characters"
+                )
+        _validate_metric(self.confidence, "confidence")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExperienceEvidence:
+    role: str
+    asset_id: str
+    asset_path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        _validate_state(self.role, _EXPERIENCE_EVIDENCE_ROLES, "role")
+        _validate_non_empty(self.asset_id, "asset_id")
+        _validate_non_empty(self.asset_path, "asset_path")
+        relative = Path(self.asset_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("asset_path must be a safe relative path")
+        if _SHA256_PATTERN.fullmatch(self.sha256) is None:
+            raise ValueError("sha256 must be a lowercase SHA-256 digest")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExperienceCitation:
+    experience_id: str
+    event_id: str
+    state: str
+    why_applicable: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.experience_id, "experience_id")
+        _validate_non_empty(self.event_id, "event_id")
+        _validate_state(self.state, _ACTIVE_EXPERIENCE_STATES, "state")
+        _validate_non_empty(self.why_applicable, "why_applicable")
+        if len(self.why_applicable) > _MAX_EXPERIENCE_TEXT_LENGTH:
+            raise ValueError(
+                "why_applicable must be at most "
+                f"{_MAX_EXPERIENCE_TEXT_LENGTH} characters"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExperienceSnapshot:
+    asset_id: str
+    asset_path: str
+    event_id: str
+    previous_event_id: str | None
+    state: str
+    content: ExperienceContent
+    evidence: tuple[ExperienceEvidence, ...]
+    extraction_session_id: str
+    source_kind: str
+    relation_type: str | None
+    related_experience_id: str | None
+    created_at: str
+    created_by: str
+    reviewed_at: str | None
+    reviewed_by: str | None
+    decision: str | None
+    asset_type: str = "experience_event"
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.asset_id, "asset_id")
+        _validate_non_empty(self.asset_path, "asset_path")
+        _validate_non_empty(self.event_id, "event_id")
+        _validate_state(self.state, _EXPERIENCE_STATES, "state")
+        _validate_non_empty(
+            self.extraction_session_id,
+            "extraction_session_id",
+        )
+        _validate_state(self.source_kind, _EXPERIENCE_SOURCE_KINDS, "source_kind")
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        roles = tuple(item.role for item in self.evidence)
+        if len(roles) != len(set(roles)) or set(roles) != set(
+            _EXPERIENCE_EVIDENCE_ROLES
+        ):
+            raise ValueError(
+                "evidence roles must contain dataset, run, "
+                "training_instance, and raw_record exactly once"
+            )
+        if self.state == "pending":
+            if self.previous_event_id is not None:
+                raise ValueError("pending state cannot have previous_event_id")
+            if any(
+                value is not None
+                for value in (
+                    self.reviewed_at,
+                    self.reviewed_by,
+                    self.decision,
+                    self.relation_type,
+                    self.related_experience_id,
+                )
+            ):
+                raise ValueError("pending state cannot contain review or relation fields")
+        else:
+            _validate_non_empty(self.previous_event_id, "previous_event_id")
+            _validate_non_empty(self.reviewed_at, "reviewed_at")
+            _validate_non_empty(self.reviewed_by, "reviewed_by")
+            _validate_non_empty(self.decision, "decision")
+            expected_decision = _EXPERIENCE_STATE_DECISIONS[self.state]
+            if self.decision != expected_decision:
+                raise ValueError(
+                    f"{self.state} state requires decision {expected_decision}"
+                )
+        relation_required = self.state in {"conflict", "superseded"}
+        if (self.relation_type is None) != (self.related_experience_id is None):
+            raise ValueError("relation type and related Experience ID must be paired")
+        if relation_required:
+            expected_relation = _EXPERIENCE_STATE_RELATIONS[self.state]
+            if self.relation_type != expected_relation:
+                raise ValueError(
+                    f"{self.state} state requires relation {expected_relation}"
+                )
+            _validate_non_empty(
+                self.related_experience_id,
+                "related_experience_id",
+            )
+            if self.related_experience_id == self.asset_id:
+                raise ValueError("relation must reference another Experience")
+        elif self.relation_type is not None:
+            raise ValueError(f"{self.state} state cannot contain a relation")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ExperienceSearchResult:
+    experience: ExperienceSnapshot
+    why_applicable: str
+    score: int
+
+    def __post_init__(self) -> None:
+        if self.experience.state not in _ACTIVE_EXPERIENCE_STATES:
+            raise ValueError("search result requires active Experience state")
+        _validate_non_empty(self.why_applicable, "why_applicable")
+        _validate_non_negative(self.score, "score")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ReviewExperienceCommand:
+    connection_path: Path
+    experience_id: str
+    decision: str
+    content: ExperienceContent
+    related_experience_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.experience_id, "experience_id")
+        _validate_state(self.decision, _EXPERIENCE_REVIEW_DECISIONS, "decision")
+        relation_required = self.decision in {"conflict", "supersede"}
+        if relation_required:
+            _validate_non_empty(
+                self.related_experience_id,
+                "related_experience_id",
+            )
+            if self.related_experience_id == self.experience_id:
+                raise ValueError("related_experience_id must be different")
+        elif self.related_experience_id is not None:
+            raise ValueError(
+                "related_experience_id requires conflict or supersede decision"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SessionExperienceOutcome:
+    session_id: str
+    outcome: str
+    candidate_ids: tuple[str, ...]
+    new_event_ids: tuple[str, ...]
+    new_instance_ids: tuple[str, ...]
+    pending_review_count: int
+    sync: SyncStatusSnapshot | None
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.session_id, "session_id")
+        _validate_state(
+            self.outcome,
+            _SESSION_EXPERIENCE_OUTCOMES,
+            "outcome",
+        )
+        _validate_non_negative(
+            self.pending_review_count,
+            "pending_review_count",
+        )
+        for field_name in (
+            "candidate_ids",
+            "new_event_ids",
+            "new_instance_ids",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)) or any(
+                not isinstance(value, str) or not value.strip()
+                for value in values
+            ):
+                raise ValueError(f"{field_name} must contain unique non-empty IDs")
+        if self.outcome == "created" and not self.candidate_ids:
+            raise ValueError("created outcome requires candidate_ids")
+        if self.outcome != "created" and self.candidate_ids:
+            raise ValueError("candidate_ids require created outcome")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
 
 
 @dataclass(frozen=True)
@@ -720,6 +971,41 @@ _SYNC_STATES = frozenset(
         "conflict",
     }
 )
+_EXPERIENCE_STATES = frozenset(
+    {"pending", "trusted", "rejected", "conflict", "superseded"}
+)
+_ACTIVE_EXPERIENCE_STATES = frozenset({"pending", "trusted"})
+_EXPERIENCE_EVIDENCE_ROLES = frozenset(
+    {"dataset", "run", "training_instance", "raw_record"}
+)
+_EXPERIENCE_SOURCE_KINDS = frozenset(
+    {"metric_improvement", "training_failure"}
+)
+_EXPERIENCE_REVIEW_DECISIONS = frozenset(
+    {"approve", "reject", "conflict", "supersede"}
+)
+_EXPERIENCE_STATE_DECISIONS = {
+    "trusted": "approve",
+    "rejected": "reject",
+    "conflict": "conflict",
+    "superseded": "supersede",
+}
+_EXPERIENCE_STATE_RELATIONS = {
+    "conflict": "conflicts_with",
+    "superseded": "superseded_by",
+}
+_SESSION_EXPERIENCE_OUTCOMES = frozenset(
+    {"started", "created", "no_op", "already_completed"}
+)
+_EXPERIENCE_CONTENT_FIELDS = (
+    "conclusion",
+    "applicability",
+    "recommended_action",
+    "failure_boundary",
+    "risk",
+)
+_MAX_EXPERIENCE_TEXT_LENGTH = 4000
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _COMPLETED_INSTANCE_EVIDENCE_FIELDS = (
     "dataset_content_fingerprint",
     "dataset_version_fingerprint",
