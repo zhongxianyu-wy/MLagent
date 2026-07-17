@@ -4,6 +4,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -316,6 +317,464 @@ class TrainingAuthorization:
     round_count: int
     authorized_at: str
     authorized_by: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopEvidenceReference:
+    role: str
+    asset_id: str
+    asset_path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        _validate_state(self.role, _SOP_EVIDENCE_ROLES, "role")
+        _validate_safe_id(self.asset_id, "asset_id")
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_sha256(self.sha256, "sha256")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class CreateSopCandidateCommand:
+    connection_path: Path
+    sop_id: str
+    name: str
+    source_run_id: str
+    source_instance_id: str
+    strategy_summary: str
+    optimization_background: str
+    steps: tuple[str, ...]
+    change_summary: str
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.sop_id, "sop_id")
+        _validate_non_empty(self.name, "name")
+        _validate_safe_id(self.source_run_id, "source_run_id")
+        _validate_safe_id(self.source_instance_id, "source_instance_id")
+        _validate_non_empty(self.strategy_summary, "strategy_summary")
+        _validate_non_empty(
+            self.optimization_background,
+            "optimization_background",
+        )
+        _validate_steps(self.steps)
+        if not isinstance(self.change_summary, str):
+            raise ValueError("change_summary must be a string")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ReproduceSopCandidateCommand:
+    connection_path: Path
+    candidate_id: str
+    expected_candidate_fingerprint: str
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.candidate_id, "candidate_id")
+        _validate_sha256(
+            self.expected_candidate_fingerprint,
+            "expected_candidate_fingerprint",
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class ReviewSopCandidateCommand:
+    connection_path: Path
+    candidate_id: str
+    expected_candidate_fingerprint: str
+    expected_gate_fingerprint: str
+    decision: str
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.candidate_id, "candidate_id")
+        _validate_sha256(
+            self.expected_candidate_fingerprint,
+            "expected_candidate_fingerprint",
+        )
+        _validate_sha256(
+            self.expected_gate_fingerprint,
+            "expected_gate_fingerprint",
+        )
+        _validate_state(self.decision, _SOP_REVIEW_DECISIONS, "decision")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopCandidateSnapshot:
+    asset_id: str
+    asset_path: str
+    sop_id: str
+    name: str
+    source_run_id: str
+    source_instance_id: str
+    candidate_fingerprint: str
+    dataset_id: str
+    dataset_version: int
+    dataset_content_fingerprint: str
+    dataset_version_fingerprint: str
+    code_fingerprint: str
+    configuration_fingerprint: str
+    environment_fingerprint: str
+    split_fingerprint: str
+    random_seed: int
+    primary_metric_name: str
+    source_metric_value: float
+    source_model_fingerprint: str
+    strategy_summary: str
+    optimization_background: str
+    steps: tuple[str, ...]
+    change_summary: str
+    evidence: tuple[SopEvidenceReference, ...]
+    created_at: str
+    created_by: str
+    asset_type: str = "sop_candidate"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "asset_id",
+            "sop_id",
+            "source_run_id",
+            "source_instance_id",
+            "dataset_id",
+        ):
+            _validate_safe_id(getattr(self, field_name), field_name)
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_non_empty(self.name, "name")
+        _validate_positive(self.dataset_version, "dataset_version")
+        for field_name in _SOP_CANDIDATE_FINGERPRINT_FIELDS:
+            _validate_sha256(getattr(self, field_name), field_name)
+        if isinstance(self.random_seed, bool) or not isinstance(
+            self.random_seed,
+            int,
+        ):
+            raise ValueError("random_seed must be an integer")
+        _validate_non_empty(self.primary_metric_name, "primary_metric_name")
+        _validate_metric(self.source_metric_value, "source_metric_value")
+        _validate_non_empty(self.strategy_summary, "strategy_summary")
+        _validate_non_empty(
+            self.optimization_background,
+            "optimization_background",
+        )
+        _validate_steps(self.steps)
+        if not isinstance(self.change_summary, str):
+            raise ValueError("change_summary must be a string")
+        roles = tuple(item.role for item in self.evidence)
+        if len(roles) != len(set(roles)) or set(roles) != set(
+            _SOP_EVIDENCE_ROLES
+        ):
+            raise ValueError(
+                "evidence roles must contain every SOP source role exactly once"
+            )
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        if self.asset_type != "sop_candidate":
+            raise ValueError("asset_type must be sop_candidate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopReproductionGateSnapshot:
+    asset_id: str
+    asset_path: str
+    candidate_id: str
+    candidate_fingerprint: str
+    gate_fingerprint: str
+    outcome: str
+    source_run_id: str
+    source_instance_id: str
+    reproduction_run_id: str
+    reproduction_instance_id: str
+    source_metric_value: float
+    reproduction_metric_value: float | None
+    source_metric_six_decimals: str
+    reproduction_metric_six_decimals: str | None
+    created_at: str
+    created_by: str
+    asset_type: str = "sop_reproduction_gate"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "asset_id",
+            "candidate_id",
+            "source_run_id",
+            "source_instance_id",
+            "reproduction_run_id",
+            "reproduction_instance_id",
+        ):
+            _validate_safe_id(getattr(self, field_name), field_name)
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_sha256(
+            self.candidate_fingerprint,
+            "candidate_fingerprint",
+        )
+        _validate_sha256(self.gate_fingerprint, "gate_fingerprint")
+        _validate_state(self.outcome, _SOP_GATE_OUTCOMES, "outcome")
+        if self.reproduction_run_id == self.source_run_id:
+            raise ValueError("reproduction_run_id must differ from source_run_id")
+        if self.reproduction_instance_id == self.source_instance_id:
+            raise ValueError(
+                "reproduction_instance_id must differ from source_instance_id"
+            )
+        _validate_metric(self.source_metric_value, "source_metric_value")
+        _validate_metric_text(
+            self.source_metric_value,
+            self.source_metric_six_decimals,
+            "source_metric_six_decimals",
+        )
+        _validate_optional_metric(
+            self.reproduction_metric_value,
+            "reproduction_metric_value",
+        )
+        if self.outcome == "execution_failed":
+            if self.reproduction_metric_value is not None:
+                raise ValueError(
+                    "execution_failed requires reproduction_metric_value to be None"
+                )
+            if self.reproduction_metric_six_decimals is not None:
+                raise ValueError(
+                    "execution_failed requires reproduction_metric_six_decimals "
+                    "to be None"
+                )
+        elif self.reproduction_metric_value is None:
+            raise ValueError(f"{self.outcome} requires reproduction_metric_value")
+        elif self.reproduction_metric_six_decimals is None:
+            raise ValueError(
+                f"{self.outcome} requires reproduction_metric_six_decimals"
+            )
+        else:
+            _validate_metric_text(
+                self.reproduction_metric_value,
+                self.reproduction_metric_six_decimals,
+                "reproduction_metric_six_decimals",
+            )
+        if self.outcome == "passed" and (
+            self.source_metric_six_decimals
+            != self.reproduction_metric_six_decimals
+        ):
+            raise ValueError("passed gate requires equal six-decimal metrics")
+        if self.outcome == "metric_mismatch" and (
+            self.source_metric_six_decimals
+            == self.reproduction_metric_six_decimals
+        ):
+            raise ValueError("metric_mismatch requires unequal six-decimal metrics")
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        if self.asset_type != "sop_reproduction_gate":
+            raise ValueError("asset_type must be sop_reproduction_gate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopVersionSnapshot:
+    asset_id: str
+    asset_path: str
+    sop_id: str
+    version: int
+    version_fingerprint: str
+    previous_version_id: str | None
+    previous_version_fingerprint: str | None
+    candidate_id: str
+    source_run_id: str
+    source_instance_id: str
+    reproduction_run_id: str
+    reproduction_instance_id: str
+    dataset_id: str
+    dataset_version: int
+    primary_metric_name: str
+    primary_metric_value: float
+    strategy_summary: str
+    optimization_background: str
+    steps: tuple[str, ...]
+    change_summary: str
+    approval_id: str
+    formal_model_id: str
+    created_at: str
+    created_by: str
+    asset_type: str = "sop_version"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "asset_id",
+            "sop_id",
+            "candidate_id",
+            "source_run_id",
+            "source_instance_id",
+            "reproduction_run_id",
+            "reproduction_instance_id",
+            "dataset_id",
+            "approval_id",
+            "formal_model_id",
+        ):
+            _validate_safe_id(getattr(self, field_name), field_name)
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_positive(self.version, "version")
+        _validate_positive(self.dataset_version, "dataset_version")
+        _validate_sha256(self.version_fingerprint, "version_fingerprint")
+        if self.version == 1:
+            if self.previous_version_id is not None:
+                raise ValueError("version 1 cannot have previous_version_id")
+            if self.previous_version_fingerprint is not None:
+                raise ValueError(
+                    "version 1 cannot have previous_version_fingerprint"
+                )
+        else:
+            _validate_safe_id(
+                self.previous_version_id,
+                "previous_version_id",
+            )
+            _validate_sha256(
+                self.previous_version_fingerprint,
+                "previous_version_fingerprint",
+            )
+            _validate_non_empty(self.change_summary, "change_summary")
+        if self.source_run_id == self.reproduction_run_id:
+            raise ValueError("reproduction_run_id must differ from source_run_id")
+        if self.source_instance_id == self.reproduction_instance_id:
+            raise ValueError(
+                "reproduction_instance_id must differ from source_instance_id"
+            )
+        _validate_non_empty(self.primary_metric_name, "primary_metric_name")
+        _validate_metric(self.primary_metric_value, "primary_metric_value")
+        _validate_non_empty(self.strategy_summary, "strategy_summary")
+        _validate_non_empty(
+            self.optimization_background,
+            "optimization_background",
+        )
+        _validate_steps(self.steps)
+        if not isinstance(self.change_summary, str):
+            raise ValueError("change_summary must be a string")
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        if self.asset_type != "sop_version":
+            raise ValueError("asset_type must be sop_version")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class FormalModelSnapshot:
+    asset_id: str
+    asset_path: str
+    model_path: str
+    model_fingerprint: str
+    sop_version_id: str
+    source_instance_id: str
+    reproduction_instance_id: str
+    dataset_id: str
+    dataset_version: int
+    primary_metric_name: str
+    primary_metric_value: float
+    strategy_summary: str
+    optimization_background: str
+    approval_id: str
+    created_at: str
+    created_by: str
+    asset_type: str = "formal_model"
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "asset_id",
+            "sop_version_id",
+            "source_instance_id",
+            "reproduction_instance_id",
+            "dataset_id",
+            "approval_id",
+        ):
+            _validate_safe_id(getattr(self, field_name), field_name)
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_safe_asset_path(self.model_path, "model_path")
+        _validate_sha256(self.model_fingerprint, "model_fingerprint")
+        if self.source_instance_id == self.reproduction_instance_id:
+            raise ValueError(
+                "reproduction_instance_id must differ from source_instance_id"
+            )
+        _validate_positive(self.dataset_version, "dataset_version")
+        _validate_non_empty(self.primary_metric_name, "primary_metric_name")
+        _validate_metric(self.primary_metric_value, "primary_metric_value")
+        _validate_non_empty(self.strategy_summary, "strategy_summary")
+        _validate_non_empty(
+            self.optimization_background,
+            "optimization_background",
+        )
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        if self.asset_type != "formal_model":
+            raise ValueError("asset_type must be formal_model")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopCandidateStatus:
+    candidate: SopCandidateSnapshot
+    gate: SopReproductionGateSnapshot | None
+    state: str
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _SOP_CANDIDATE_STATES, "state")
+        if self.gate is not None and self.gate.candidate_id != self.candidate.asset_id:
+            raise ValueError("gate must reference candidate")
+        if self.state == "pending_reproduction" and self.gate is not None:
+            raise ValueError("pending_reproduction requires gate to be None")
+        if self.state != "pending_reproduction" and self.gate is None:
+            raise ValueError(f"{self.state} requires gate")
+        if self.state in {"pending_review", "approved", "rejected"} and (
+            self.gate is not None and self.gate.outcome != "passed"
+        ):
+            raise ValueError(f"{self.state} requires a passed gate")
+        if self.state == "reproduction_failed" and (
+            self.gate is not None and self.gate.outcome == "passed"
+        ):
+            raise ValueError("reproduction_failed requires a failed gate")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class SopReviewOutcome:
+    decision: str
+    candidate_id: str
+    gate_id: str
+    approval_id: str
+    sop_version: SopVersionSnapshot | None
+    formal_model: FormalModelSnapshot | None
+
+    def __post_init__(self) -> None:
+        _validate_state(self.decision, _SOP_REVIEW_DECISIONS, "decision")
+        for field_name in ("candidate_id", "gate_id", "approval_id"):
+            _validate_safe_id(getattr(self, field_name), field_name)
+        formal_assets_present = (
+            self.sop_version is not None,
+            self.formal_model is not None,
+        )
+        if self.decision == "approve" and not all(formal_assets_present):
+            raise ValueError("approve requires both formal assets")
+        if self.decision == "reject" and any(formal_assets_present):
+            raise ValueError("reject cannot contain formal assets")
+        if (
+            self.sop_version is not None
+            and self.formal_model is not None
+            and self.formal_model.sop_version_id != self.sop_version.asset_id
+        ):
+            raise ValueError("formal assets must reference the same SOP version")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -1034,6 +1493,33 @@ _EXPERIENCE_STATE_RELATIONS = {
 _SESSION_EXPERIENCE_OUTCOMES = frozenset(
     {"started", "created", "no_op", "already_completed"}
 )
+_SOP_EVIDENCE_ROLES = frozenset(
+    {
+        "dataset",
+        "run",
+        "training_instance",
+        "input",
+        "environment",
+        "split",
+        "code_revision",
+        "metrics",
+        "predictions",
+        "source_model",
+    }
+)
+_SOP_GATE_OUTCOMES = frozenset(
+    {"passed", "execution_failed", "metric_mismatch", "evidence_mismatch"}
+)
+_SOP_REVIEW_DECISIONS = frozenset({"approve", "reject"})
+_SOP_CANDIDATE_STATES = frozenset(
+    {
+        "pending_reproduction",
+        "pending_review",
+        "reproduction_failed",
+        "approved",
+        "rejected",
+    }
+)
 _EXPERIENCE_CONTENT_FIELDS = (
     "conclusion",
     "applicability",
@@ -1043,6 +1529,17 @@ _EXPERIENCE_CONTENT_FIELDS = (
 )
 _MAX_EXPERIENCE_TEXT_LENGTH = 4000
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_SOP_CANDIDATE_FINGERPRINT_FIELDS = (
+    "candidate_fingerprint",
+    "dataset_content_fingerprint",
+    "dataset_version_fingerprint",
+    "code_fingerprint",
+    "configuration_fingerprint",
+    "environment_fingerprint",
+    "split_fingerprint",
+    "source_model_fingerprint",
+)
 _COMPLETED_INSTANCE_EVIDENCE_FIELDS = (
     "dataset_content_fingerprint",
     "dataset_version_fingerprint",
@@ -1100,6 +1597,47 @@ def _validate_primary_metric(
 def _validate_non_empty(value: str | None, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be non-empty")
+
+
+def _validate_safe_id(value: str | None, field_name: str) -> None:
+    _validate_non_empty(value, field_name)
+    if _SAFE_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a safe stable ID")
+
+
+def _validate_safe_asset_path(value: str, field_name: str) -> None:
+    _validate_non_empty(value, field_name)
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path == Path("."):
+        raise ValueError(f"{field_name} must be a safe relative path")
+
+
+def _validate_sha256(value: str | None, field_name: str) -> None:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+
+
+def _validate_steps(steps: tuple[str, ...]) -> None:
+    if not isinstance(steps, tuple) or not steps:
+        raise ValueError("steps must be a non-empty tuple")
+    for step in steps:
+        _validate_non_empty(step, "steps")
+
+
+def _validate_metric_text(
+    value: float,
+    text: str,
+    field_name: str,
+) -> None:
+    expected = format(
+        Decimal(str(value)).quantize(
+            Decimal("0.000001"),
+            rounding=ROUND_HALF_UP,
+        ),
+        ".6f",
+    )
+    if text != expected:
+        raise ValueError(f"{field_name} must equal the six-decimal metric")
 
 
 def _validate_parent_fingerprint(
