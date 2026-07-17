@@ -23,7 +23,7 @@ def test_domain_core_bootstrap_writes_local_connection_and_builds_index(tmp_path
     )
 
     assert snapshot.ready is True
-    assert snapshot.indexed_assets == 1
+    assert snapshot.indexed_assets == 2
     assert json.loads(connection_path.read_text()) == {
         "actor_id": "alice",
         "repository_path": str(repository_path.resolve()),
@@ -51,8 +51,8 @@ def test_domain_core_reopens_connection_and_rebuilds_deleted_index(tmp_path):
     rebuilt = core.rebuild_local_index(connection_path)
 
     assert reopened.repository_id == "tmr-1"
-    assert reopened.indexed_assets == 1
-    assert rebuilt.asset_count == 1
+    assert reopened.indexed_assets == 2
+    assert rebuilt.asset_count == 2
     assert rebuilt.index_path.is_file()
 
 

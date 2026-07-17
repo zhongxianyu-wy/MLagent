@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import uuid
@@ -18,6 +19,7 @@ from src.domain.models import (
 
 SCHEMA_VERSION = 1
 MANIFEST_PATH = Path(".mlagent/repository.json")
+REVIEWER_POLICY_PATH = Path("approvals/reviewer-policy.json")
 MANAGED_PATHS = (
     "datasets",
     "raw-records",
@@ -113,11 +115,12 @@ class MemoryRepository:
                 message="The generated Team Memory Repository ID is empty or invalid.",
                 next_action="Retry with a repository ID generator that returns a stable non-empty string.",
             )
+        created_at = self.clock()
         manifest = {
             "asset_type": "team_memory_repository",
             "repository_id": repository_id,
             "schema_version": SCHEMA_VERSION,
-            "created_at": self.clock(),
+            "created_at": created_at,
             "created_by": actor_id,
             "managed_paths": list(MANAGED_PATHS),
             "limits": {
@@ -127,6 +130,18 @@ class MemoryRepository:
             },
         }
         self._validate_manifest(manifest)
+        reviewer_policy = {
+            "asset_type": "reviewer_policy",
+            "asset_id": "reviewer-policy",
+            "schema_version": 1,
+            "reviewer_ids": [actor_id],
+            "created_at": created_at,
+            "created_by": actor_id,
+        }
+        reviewer_policy["policy_fingerprint"] = (
+            self.reviewer_policy_fingerprint(reviewer_policy)
+        )
+        self._validate_reviewer_policy(reviewer_policy)
 
         try:
             for managed_path in MANAGED_PATHS:
@@ -134,6 +149,18 @@ class MemoryRepository:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            reviewer_policy_path = root / REVIEWER_POLICY_PATH
+            reviewer_policy_path.parent.mkdir(parents=True, exist_ok=True)
+            reviewer_policy_path.write_text(
+                json.dumps(
+                    reviewer_policy,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=True,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             self._merge_ignore_rules(root)
@@ -190,6 +217,7 @@ class MemoryRepository:
             root,
             manifest,
         )
+        load_authorized_reviewers(root)
         for managed_path in MANAGED_PATHS:
             (root / managed_path).mkdir(parents=True, exist_ok=True)
         self._merge_ignore_rules(root)
@@ -275,7 +303,14 @@ class MemoryRepository:
     def _commit_bootstrap(root: Path, actor_id: str) -> None:
         try:
             staged = subprocess.run(
-                ["git", "add", "--", ".gitignore", str(MANIFEST_PATH)],
+                [
+                    "git",
+                    "add",
+                    "--",
+                    ".gitignore",
+                    str(MANIFEST_PATH),
+                    str(REVIEWER_POLICY_PATH),
+                ],
                 cwd=root,
                 capture_output=True,
                 text=True,
@@ -578,6 +613,76 @@ class MemoryRepository:
             )
 
     @staticmethod
+    def reviewer_policy_fingerprint(policy: dict[str, Any]) -> str:
+        canonical = dict(policy)
+        canonical.pop("policy_fingerprint", None)
+        return hashlib.sha256(
+            json.dumps(
+                canonical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _validate_reviewer_policy(policy: dict[str, Any]) -> None:
+        required = {
+            "asset_type",
+            "asset_id",
+            "schema_version",
+            "reviewer_ids",
+            "created_at",
+            "created_by",
+            "policy_fingerprint",
+        }
+        if set(policy) != required:
+            raise _invalid_reviewer_policy(
+                "Reviewer policy fields do not match schema version 1."
+            )
+        if (
+            policy["asset_type"] != "reviewer_policy"
+            or policy["asset_id"] != "reviewer-policy"
+            or policy["schema_version"] != 1
+        ):
+            raise _invalid_reviewer_policy(
+                "Reviewer policy identity does not match schema version 1."
+            )
+        reviewers = policy["reviewer_ids"]
+        if (
+            not isinstance(reviewers, list)
+            or not reviewers
+            or any(
+                not isinstance(reviewer, str) or not reviewer.strip()
+                for reviewer in reviewers
+            )
+            or reviewers != sorted(set(reviewers))
+        ):
+            raise _invalid_reviewer_policy(
+                "Reviewer IDs must be a sorted, unique, non-empty list."
+            )
+        if (
+            not isinstance(policy["created_at"], str)
+            or not policy["created_at"].strip()
+            or not isinstance(policy["created_by"], str)
+            or not policy["created_by"].strip()
+        ):
+            raise _invalid_reviewer_policy(
+                "Reviewer policy audit fields must be non-empty strings."
+            )
+        fingerprint = policy["policy_fingerprint"]
+        if (
+            not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+            or fingerprint
+            != MemoryRepository.reviewer_policy_fingerprint(policy)
+        ):
+            raise _invalid_reviewer_policy(
+                "Reviewer policy fingerprint is missing or invalid."
+            )
+
+    @staticmethod
     def _capacity_policy_is_valid(
         max_file_bytes: Any,
         max_repository_bytes: Any,
@@ -621,6 +726,7 @@ class MemoryRepository:
                     "--",
                     ".gitignore",
                     str(MANIFEST_PATH),
+                    str(REVIEWER_POLICY_PATH),
                 ],
                 cwd=root,
                 capture_output=True,
@@ -629,7 +735,11 @@ class MemoryRepository:
             )
         except OSError:
             pass
-        for path in (root / MANIFEST_PATH, root / ".gitignore"):
+        for path in (
+            root / REVIEWER_POLICY_PATH,
+            root / MANIFEST_PATH,
+            root / ".gitignore",
+        ):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -849,3 +959,43 @@ def _utc_now() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def load_authorized_reviewers(repository_path: Path) -> tuple[str, ...]:
+    root = repository_path.expanduser().resolve()
+    manifest = MemoryRepository._load_manifest(root / MANIFEST_PATH)
+    MemoryRepository._validate_manifest(manifest)
+    policy_path = root / REVIEWER_POLICY_PATH
+    if not policy_path.exists():
+        return (manifest["created_by"],)
+    try:
+        if policy_path.is_symlink() or not policy_path.resolve(
+            strict=True
+        ).is_relative_to(root):
+            raise _invalid_reviewer_policy(
+                "Reviewer policy path must remain inside the repository."
+            )
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except WorkspaceError:
+        raise
+    except (OSError, json.JSONDecodeError) as error:
+        raise _invalid_reviewer_policy(
+            "Reviewer policy is not readable JSON."
+        ) from error
+    if not isinstance(payload, dict):
+        raise _invalid_reviewer_policy(
+            "Reviewer policy must be a JSON object."
+        )
+    MemoryRepository._validate_reviewer_policy(payload)
+    return tuple(payload["reviewer_ids"])
+
+
+def _invalid_reviewer_policy(message: str) -> WorkspaceError:
+    return WorkspaceError(
+        code="invalid_reviewer_policy",
+        message=message,
+        next_action=(
+            "Restore approvals/reviewer-policy.json from an approved Git "
+            "revision before reviewing an SOP candidate."
+        ),
+    )

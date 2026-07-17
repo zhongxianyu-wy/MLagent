@@ -43,7 +43,11 @@ def test_bootstrap_creates_and_reopens_authoritative_git_workspace(tmp_path):
         text=True,
         check=True,
     ).stdout.splitlines()
-    assert tracked == [".gitignore", ".mlagent/repository.json"]
+    assert tracked == [
+        ".gitignore",
+        ".mlagent/repository.json",
+        "approvals/reviewer-policy.json",
+    ]
     assert subprocess.run(
         ["git", "rev-parse", "--verify", "HEAD"],
         cwd=repository_path,

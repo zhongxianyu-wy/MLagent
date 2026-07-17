@@ -129,7 +129,7 @@ def test_domain_core_session_start_syncs_then_rebuilds_index(
 
     assert status.state == "synced"
     assert snapshot.sync == status
-    assert snapshot.indexed_assets == 2
+    assert snapshot.indexed_assets == 3
 
 
 def test_new_experience_session_requires_safe_startup_sync(

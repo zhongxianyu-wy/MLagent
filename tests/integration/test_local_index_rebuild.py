@@ -67,14 +67,15 @@ def test_deleted_index_rebuilds_without_changing_authoritative_assets(tmp_path):
     index.path.unlink()
     rebuilt = index.rebuild()
 
-    assert first.asset_count == rebuilt.asset_count == 2
+    assert first.asset_count == rebuilt.asset_count == 3
     assert authoritative_bytes(repository_path) == before
     assert [row["asset_id"] for row in index.list_assets()] == [
         "tmr-1",
+        "reviewer-policy",
         "experience-1",
     ]
-    assert index.list_assets()[1]["state"] == "pending"
-    assert "status" not in index.list_assets()[1]
+    assert index.list_assets()[2]["state"] == "pending"
+    assert "status" not in index.list_assets()[2]
 
 
 def test_corrupt_index_is_replaced_from_authoritative_assets(tmp_path):
@@ -85,8 +86,8 @@ def test_corrupt_index_is_replaced_from_authoritative_assets(tmp_path):
 
     rebuilt = index.rebuild()
 
-    assert rebuilt.asset_count == 2
-    assert len(index.list_assets()) == 2
+    assert rebuilt.asset_count == 3
+    assert len(index.list_assets()) == 3
 
 
 def test_local_index_never_appears_in_git_status(tmp_path):
@@ -128,5 +129,6 @@ def test_local_index_ignores_untracked_and_modified_worktree_json(tmp_path):
 
     assert [row["asset_id"] for row in index.list_assets()] == [
         "tmr-1",
+        "reviewer-policy",
         "experience-1",
     ]
