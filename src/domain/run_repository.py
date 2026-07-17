@@ -761,6 +761,81 @@ class RunRepository:
                 next_action="Restore the sealed instance from Git.",
             ) from error
 
+    def load_instance_input(
+        self,
+        run_id: str,
+        instance_id: str,
+    ) -> dict[str, Any]:
+        path = self.load_instance_file(run_id, instance_id, "input")
+        return self._load_json(path, "invalid_training_instance")
+
+    def load_instance_environment(
+        self,
+        run_id: str,
+        instance_id: str,
+    ) -> dict[str, Any]:
+        path = self.load_instance_file(run_id, instance_id, "environment")
+        return self._load_json(path, "invalid_training_instance")
+
+    def load_instance_file(
+        self,
+        run_id: str,
+        instance_id: str,
+        role: str,
+    ) -> Path:
+        instance = self.load_instance(run_id, instance_id)
+        manifest_path = self.repository_path / instance.asset_path
+        manifest = self._load_json(
+            manifest_path,
+            "invalid_training_instance",
+        )
+        files = manifest.get("files")
+        fingerprints = manifest.get("file_fingerprints")
+        if (
+            not isinstance(role, str)
+            or not role.strip()
+            or not isinstance(files, dict)
+            or not isinstance(fingerprints, dict)
+            or role not in files
+        ):
+            self._invalid_instance(f"evidence role is unavailable: {role}")
+        filename = files[role]
+        relative = Path(filename) if isinstance(filename, str) else Path("..")
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative == Path(".")
+        ):
+            self._invalid_instance(f"evidence path is unsafe: {role}")
+        path = manifest_path.parent / relative
+        self._validate_path(path, managed=True)
+        if path.is_symlink() or not path.is_file():
+            self._invalid_instance(f"evidence is unavailable: {role}")
+        if fingerprints.get(role) != _sha256(path.read_bytes()):
+            self._invalid_instance(f"evidence fingerprint changed: {role}")
+        return path
+
+    def load_code_revision_for_instance(
+        self,
+        run_id: str,
+        instance_id: str,
+    ) -> FrozenCodeRevisionSnapshot:
+        instance = self.load_instance(run_id, instance_id)
+        input_payload = self.load_instance_input(run_id, instance_id)
+        value = input_payload.get("code_revision_path")
+        if not isinstance(value, str) or not value.strip():
+            self._invalid_instance("code revision path is missing")
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            self._invalid_instance("code revision path is unsafe")
+        revision = self._load_code_revision(
+            self.repository_path / relative,
+            run_id,
+        )
+        if revision.code_fingerprint != instance.code_fingerprint:
+            self._invalid_instance("code revision fingerprint does not match")
+        return revision
+
     def instance_fingerprint(self, instance: TrainingInstanceSnapshot) -> str:
         payload = self._load_json(
             self.repository_path / instance.asset_path,
