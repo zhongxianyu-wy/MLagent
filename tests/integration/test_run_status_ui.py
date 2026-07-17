@@ -176,6 +176,7 @@ class RunStatusWorkspace:
                 dataset_version_fingerprint=plan.dataset_version_fingerprint,
                 plan_id=plan.plan_id,
                 plan_event_id=plan.asset_id,
+                planning_session_id=plan.planning_session_id,
                 plan_fingerprint=plan.plan_fingerprint,
                 approval_id=approval.asset_id,
                 approval_fingerprint=approval.approval_fingerprint,

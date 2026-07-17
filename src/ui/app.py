@@ -662,17 +662,16 @@ def _render_experience_review_form(
     )
     if decision is None:
         return
-    edited = ExperienceContent(
-        conclusion=conclusion,
-        applicability=applicability,
-        recommended_action=recommended_action,
-        failure_boundary=failure_boundary,
-        risk=risk,
-        confidence=confidence,
-    )
-    _submit_experience_review(
-        core,
-        ReviewExperienceCommand(
+    try:
+        edited = ExperienceContent(
+            conclusion=conclusion,
+            applicability=applicability,
+            recommended_action=recommended_action,
+            failure_boundary=failure_boundary,
+            risk=risk,
+            confidence=confidence,
+        )
+        command = ReviewExperienceCommand(
             connection_path=connection_path,
             experience_id=experience.asset_id,
             decision=decision,
@@ -680,7 +679,13 @@ def _render_experience_review_form(
             related_experience_id=(
                 conflict_target if decision == "conflict" else None
             ),
-        ),
+        )
+    except ValueError as error:
+        st.error(str(error))
+        return
+    _submit_experience_review(
+        core,
+        command,
     )
 
 

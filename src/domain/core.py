@@ -149,9 +149,23 @@ class DomainCore:
         connection, repository = self._open_connected_repository(
             connection_path
         )
-        outcome = self._experience_repository(
-            repository.repository_path
-        ).start_session(
+        experiences = self._experience_repository(repository.repository_path)
+        marker_exists = experiences.has_session_start(session_id)
+        if status.state not in {"synced", "not_configured"} and not (
+            status.state == "pending_sync" and marker_exists
+        ):
+            raise WorkspaceError(
+                code="experience_session_sync_required",
+                message=(
+                    "A new Experience session boundary requires a safe "
+                    "startup synchronization."
+                ),
+                next_action=(
+                    "Resolve Team Memory synchronization, then retry "
+                    "SessionStart."
+                ),
+            )
+        outcome = experiences.start_session(
             session_id,
             actor_id=connection.actor_id,
             capacity=repository.capacity,

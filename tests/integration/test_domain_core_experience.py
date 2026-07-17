@@ -100,7 +100,7 @@ class DomainExperienceWorkspace:
                 "run",
                 f"run-{experience_id}",
                 self.memory_root
-                / f"raw-records/evidence/{experience_id}-run.json",
+                / f"raw-records/runs/evidence/{experience_id}-run.json",
             ),
             (
                 "training_instance",
@@ -112,17 +112,35 @@ class DomainExperienceWorkspace:
                 "raw_record",
                 f"record-{experience_id}",
                 self.memory_root
-                / f"raw-records/evidence/{experience_id}-record.json",
+                / f"raw-records/runs/evidence/{experience_id}-record.json",
             ),
         ]
         for role, asset_id, path in evidence_specs[1:]:
-            write_json(
-                path,
-                {
+            if role == "run":
+                payload = {
+                    "asset_type": "run_event",
+                    "asset_id": f"event-start-{experience_id}",
+                    "run_id": asset_id,
+                    "event_type": "run_started",
+                    "created_at": "2026-07-17T00:00:00Z",
+                }
+            elif role == "raw_record":
+                payload = {
+                    "asset_type": "run_event",
+                    "asset_id": asset_id,
+                    "run_id": f"run-{experience_id}",
+                    "event_type": "instance_completed",
+                    "created_at": "2026-07-17T00:00:00Z",
+                }
+            else:
+                payload = {
                     "asset_type": role,
                     "asset_id": asset_id,
                     "created_at": "2026-07-17T00:00:00Z",
-                },
+                }
+            write_json(
+                path,
+                payload,
             )
         evidence = [
             {
@@ -143,14 +161,13 @@ class DomainExperienceWorkspace:
             "risk": "May not transfer.",
             "confidence": 0.6,
         }
-        write_json(
-            family / f"{pending_event}.json",
-            {
+        pending_payload = {
                 "asset_type": "experience_event",
                 "asset_id": pending_event,
                 "experience_id": experience_id,
                 "schema_version": 1,
                 "previous_event_id": None,
+                "previous_event_fingerprint": None,
                 "state": "pending",
                 "content": content,
                 "evidence": evidence,
@@ -163,20 +180,24 @@ class DomainExperienceWorkspace:
                 "reviewed_at": None,
                 "reviewed_by": None,
                 "decision": None,
-            },
+            }
+        write_experience_event(
+            family / f"{pending_event}.json",
+            pending_payload,
         )
         if state == "pending":
             return pending_event
         trusted_event = f"{experience_id}-trusted"
         trusted_content = dict(content, confidence=0.9)
-        write_json(
-            family / f"{trusted_event}.json",
-            {
+        trusted_payload = {
                 "asset_type": "experience_event",
                 "asset_id": trusted_event,
                 "experience_id": experience_id,
                 "schema_version": 1,
                 "previous_event_id": pending_event,
+                "previous_event_fingerprint": pending_payload[
+                    "event_fingerprint"
+                ],
                 "state": "trusted",
                 "content": trusted_content,
                 "evidence": evidence,
@@ -189,7 +210,10 @@ class DomainExperienceWorkspace:
                 "reviewed_at": "2026-07-17T00:01:00Z",
                 "reviewed_by": "reviewer",
                 "decision": "approve",
-            },
+            }
+        write_experience_event(
+            family / f"{trusted_event}.json",
+            trusted_payload,
         )
         return trusted_event
 
@@ -442,3 +466,14 @@ def write_json(path, payload):
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def write_experience_event(path, payload):
+    payload["event_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    write_json(path, payload)

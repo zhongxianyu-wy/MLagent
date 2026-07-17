@@ -39,6 +39,7 @@ def bounded_session_start_message(
     outcome: SessionExperienceOutcome,
 ) -> str:
     return _bounded(
+        f"Session {_clean(outcome.session_id, 100)}. "
         f"Experience Review: {outcome.pending_review_count} pending. "
         f"{bounded_sync_message(_require_sync(outcome))}"
     )

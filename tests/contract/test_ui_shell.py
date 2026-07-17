@@ -357,7 +357,9 @@ def experience_snapshot(
         asset_id=experience_id,
         asset_path=f"experiences/{experience_id}/event.json",
         event_id=f"{experience_id}-event",
+        event_fingerprint="e" * 64,
         previous_event_id=None if pending else f"{experience_id}-pending",
+        previous_event_fingerprint=None if pending else "d" * 64,
         state=state,
         content=ExperienceContent(
             conclusion="Feature filtering improved roc_auc.",

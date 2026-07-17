@@ -113,6 +113,7 @@ def test_session_start_hook_delegates_and_emits_bounded_context(
     output = payload["hookSpecificOutput"]
     assert output["hookEventName"] == "SessionStart"
     assert "Synced" in output["additionalContext"]
+    assert "session-1" in output["additionalContext"]
     assert len(output["additionalContext"]) <= 800
     assert str(configured_hook_workspace.remote) not in result.stdout
     assert "secret-token" not in result.stdout
@@ -169,6 +170,61 @@ def test_stop_hook_commits_managed_changes_without_blocking_stop(
         ).read_text(encoding="utf-8")
     )
     assert stop_record["outcome"] == "no_op"
+
+
+def test_stop_hook_extracts_current_session_training_candidate(
+    configured_hook_workspace,
+):
+    seed_hook_parent(configured_hook_workspace.memory)
+    git(configured_hook_workspace.memory, "add", "--", "datasets", "runs", "raw-records")
+    git(
+        configured_hook_workspace.memory,
+        "-c",
+        "user.name=alice",
+        "-c",
+        "user.email=mlagent@local",
+        "commit",
+        "-m",
+        "test: seed parent training evidence",
+    )
+    git(configured_hook_workspace.memory, "push")
+    started = run_hook(
+        ".claude/hooks/mlagent-session-start.sh",
+        {
+            "session_id": "session-training",
+            "cwd": str(configured_hook_workspace.root),
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+        },
+        configured_hook_workspace.environment,
+    )
+    assert started.returncode == 0
+    seed_hook_child(
+        configured_hook_workspace.memory,
+        "session-training",
+    )
+
+    result = run_hook(
+        ".claude/hooks/mlagent-session-stop.sh",
+        {
+            "session_id": "session-training",
+            "cwd": str(configured_hook_workspace.root),
+            "hook_event_name": "Stop",
+            "stop_hook_active": False,
+        },
+        configured_hook_workspace.environment,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert "Created 1" in payload["systemMessage"]
+    candidates = tuple(
+        configured_hook_workspace.memory.glob("experiences/*/*.json")
+    )
+    assert len(candidates) == 1
+    candidate = json.loads(candidates[0].read_text(encoding="utf-8"))
+    assert candidate["state"] == "pending"
+    assert candidate["extraction_session_id"] == "session-training"
 
 
 @pytest.mark.parametrize(
@@ -239,3 +295,96 @@ def test_sync_hook_wrappers_fail_visible_and_nonblocking_when_python_crashes(
     assert result.returncode == 0
     assert output_key in json.loads(result.stdout)
     assert "failed" in result.stderr.lower()
+
+
+def seed_hook_parent(memory: Path) -> None:
+    write_json(
+        memory / "datasets/ds-1/v0001/manifest.json",
+        {
+            "asset_type": "dataset_version",
+            "asset_id": "ds-1:v1",
+            "dataset_id": "ds-1",
+        },
+    )
+    write_json(
+        memory / "raw-records/runs/run-1/event-start.json",
+        {
+            "asset_type": "run_event",
+            "asset_id": "event-start",
+            "run_id": "run-1",
+            "event_type": "run_started",
+        },
+    )
+    write_hook_instance(
+        memory,
+        "instance-parent",
+        "event-parent",
+        metric=0.7,
+        parent_id=None,
+        planning_session_id="session-historical",
+    )
+
+
+def seed_hook_child(memory: Path, session_id: str) -> None:
+    write_hook_instance(
+        memory,
+        "instance-child",
+        "event-child",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id=session_id,
+    )
+
+
+def write_hook_instance(
+    memory: Path,
+    instance_id: str,
+    event_id: str,
+    *,
+    metric: float,
+    parent_id: str | None,
+    planning_session_id: str,
+) -> None:
+    root = memory / f"runs/run-1/instances/{instance_id}"
+    write_json(
+        root / "input.json",
+        {
+            "run_id": "run-1",
+            "instance_id": instance_id,
+            "dataset_asset_path": "datasets/ds-1/v0001/manifest.json",
+            "planning_session_id": planning_session_id,
+            "optimization_direction": "feature_filtering",
+        },
+    )
+    write_json(
+        root / "manifest.json",
+        {
+            "asset_type": "training_instance",
+            "asset_id": instance_id,
+            "run_id": "run-1",
+            "state": "completed",
+            "parent_instance_id": parent_id,
+            "primary_metric_name": "roc_auc",
+            "primary_metric_value": metric,
+            "optimization_direction": "feature_filtering",
+        },
+    )
+    write_json(
+        memory / f"raw-records/runs/run-1/{event_id}.json",
+        {
+            "asset_type": "run_event",
+            "asset_id": event_id,
+            "run_id": "run-1",
+            "event_type": "instance_completed",
+            "state": "completed",
+            "instance_id": instance_id,
+        },
+    )
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )

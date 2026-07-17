@@ -87,6 +87,7 @@ class RunWorkspace:
                 dataset_version_fingerprint="dataset-version-sha",
                 plan_id="plan-1",
                 plan_event_id="plan-event-1",
+                planning_session_id="session-1",
                 plan_fingerprint="plan-sha",
                 approval_id="approval-1",
                 approval_fingerprint="approval-sha",
@@ -290,7 +291,9 @@ def test_run_and_instance_freeze_included_experience_usage(run_workspace):
 
     expected = [item.to_dict() for item in citations]
     assert start["experience_citations"] == expected
+    assert start["planning_session_id"] == "session-1"
     assert input_payload["experience_citations"] == expected
+    assert input_payload["planning_session_id"] == "session-1"
     assert manifest["experience_citations"] == expected
     assert sealed.experience_citations == citations
     assert "experience-excluded" not in json.dumps(manifest)

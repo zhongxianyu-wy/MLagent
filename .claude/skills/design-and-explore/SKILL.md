@@ -24,14 +24,25 @@ the opportunity to inspect both plan and code in the read-only Run Status view.
 1. Identify the exact confirmed Dataset Version from Dataset Overview. Do not substitute a latest
    version when the user selected a specific version.
 2. Ask only for missing direction or resource constraints that prevent a complete record.
-3. Use relevant Trusted Experience as normal references. Label Pending Experience as low
-   confidence. Keep user-excluded Pending Experience visible but do not use it to design changes.
+3. Retrieve relevant guidance before designing:
+
+```bash
+python -m src.agent.main experience search \
+  --workspace-config .mlagent-workspace.json \
+  --query "<dataset, metric, and optimization direction>" \
+  --dataset-id <dataset-id> \
+  --include-pending
+```
+
+Keep Trusted and Pending results separate and preserve each returned `why_applicable`. Use relevant
+Trusted Experience as normal references. Label Pending Experience as low confidence. Keep
+user-excluded Pending Experience visible but do not use it to design changes.
 4. Complete one JSON plan with this structure:
 
 ```json
 {
   "plan_id": "plan-<stable-id>",
-  "planning_session_id": "session-<stable-id>",
+  "planning_session_id": "<current Claude Code session ID>",
   "user_direction": "User's requested exploration direction",
   "baseline_hypothesis": "Baseline hypothesis",
   "rounds": [
@@ -52,6 +63,10 @@ the opportunity to inspect both plan and code in the read-only Run Status view.
   "candidate_code_paths": ["train.py"]
 }
 ```
+
+`planning_session_id` must be the current Claude Code session ID reported by SessionStart. Do not
+invent or reuse a different session ID; Stop extraction uses this exact identity to exclude training
+evidence created by other concurrent sessions.
 
 5. Generate UTF-8 candidate training code under the selected managed code root. Use relative paths
    in the plan and do not read or write through symlinks. Select one approved Python entrypoint that

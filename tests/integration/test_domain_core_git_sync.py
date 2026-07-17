@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from src.domain.core import DomainCore
-from src.domain.models import BootstrapMemoryCommand, SessionStopSyncCommand
+from src.domain.models import (
+    BootstrapMemoryCommand,
+    SessionStopSyncCommand,
+    WorkspaceError,
+)
 
 
 def git(
@@ -126,6 +130,52 @@ def test_domain_core_session_start_syncs_then_rebuilds_index(
     assert status.state == "synced"
     assert snapshot.sync == status
     assert snapshot.indexed_assets == 2
+
+
+def test_new_experience_session_requires_safe_startup_sync(
+    sync_core_workspace,
+):
+    disabled_remote = sync_core_workspace.remote.with_name(
+        "team-memory.disabled"
+    )
+    sync_core_workspace.remote.rename(disabled_remote)
+    try:
+        with pytest.raises(WorkspaceError, match="synchron"):
+            sync_core_workspace.core.start_session(
+                sync_core_workspace.connection_path,
+                "session-unsafe",
+            )
+    finally:
+        disabled_remote.rename(sync_core_workspace.remote)
+
+    assert not (
+        sync_core_workspace.memory_root
+        / "raw-records/sessions/session-unsafe/start.json"
+    ).exists()
+
+
+def test_repeated_start_reuses_existing_boundary_while_marker_is_pending_sync(
+    sync_core_workspace,
+):
+    first = sync_core_workspace.core.start_session(
+        sync_core_workspace.connection_path,
+        "session-resume",
+    )
+    marker = (
+        sync_core_workspace.memory_root
+        / "raw-records/sessions/session-resume/start.json"
+    )
+    before = marker.read_bytes()
+
+    resumed = sync_core_workspace.core.start_session(
+        sync_core_workspace.connection_path,
+        "session-resume",
+    )
+
+    assert first.sync.state == "synced"
+    assert resumed.outcome == "started"
+    assert resumed.sync.state == "pending_sync"
+    assert marker.read_bytes() == before
 
 
 def test_domain_core_stop_preserves_pending_commit_on_remote_failure(

@@ -47,6 +47,12 @@ DECISION_RELATION = {
     "conflict": "conflicts_with",
     "supersede": "superseded_by",
 }
+EVIDENCE_PATH_ROOTS = {
+    "dataset": ("datasets",),
+    "run": ("raw-records",),
+    "training_instance": ("runs",),
+    "raw_record": ("raw-records",),
+}
 
 
 class ExperienceRepository:
@@ -57,6 +63,12 @@ class ExperienceRepository:
     ) -> None:
         self.repository_path = repository_path.expanduser().resolve()
         self.clock = clock or _utc_now
+
+    def has_session_start(self, session_id: str) -> bool:
+        self._validate_id(session_id, "session ID")
+        path = self.repository_path / SESSION_ROOT / session_id / "start.json"
+        self._validate_path(path)
+        return path.is_file()
 
     def start_session(
         self,
@@ -104,13 +116,13 @@ class ExperienceRepository:
         with self._lock():
             stop_path = self.repository_path / SESSION_ROOT / session_id / "stop.json"
             if stop_path.exists():
-                self._load_session_stop(session_id)
+                previous = self._load_session_stop(session_id)
                 return SessionExperienceOutcome(
                     session_id=session_id,
-                    outcome="already_completed",
-                    candidate_ids=(),
-                    new_event_ids=(),
-                    new_instance_ids=(),
+                    outcome=previous["outcome"],
+                    candidate_ids=tuple(previous["candidate_ids"]),
+                    new_event_ids=tuple(previous["new_event_ids"]),
+                    new_instance_ids=tuple(previous["new_instance_ids"]),
                     pending_review_count=self.pending_count(),
                     sync=None,
                 )
@@ -220,7 +232,20 @@ class ExperienceRepository:
                 cursor = by_id[predecessor]
         if len(visited) != len(events) or reverse[-1].state != "pending":
             self._invalid_experience(experience_id)
-        return tuple(reversed(reverse))
+        history = tuple(reversed(reverse))
+        for previous, current in zip(history, history[1:]):
+            if (
+                current.previous_event_fingerprint
+                != previous.event_fingerprint
+                or current.decision not in ALLOWED_TRANSITIONS[previous.state]
+                or DECISION_STATE[current.decision] != current.state
+                or current.evidence != previous.evidence
+                or current.extraction_session_id
+                != previous.extraction_session_id
+                or current.source_kind != previous.source_kind
+            ):
+                self._invalid_experience(experience_id)
+        return history
 
     def list_current(
         self,
@@ -296,6 +321,7 @@ class ExperienceRepository:
                 "experience_id": current.asset_id,
                 "schema_version": EXPERIENCE_SCHEMA_VERSION,
                 "previous_event_id": current.event_id,
+                "previous_event_fingerprint": current.event_fingerprint,
                 "state": next_state,
                 "content": command.content.to_dict(),
                 "evidence": [item.to_dict() for item in current.evidence],
@@ -311,6 +337,7 @@ class ExperienceRepository:
                 "reviewed_by": actor_id,
                 "decision": command.decision,
             }
+            payload["event_fingerprint"] = _fingerprint(payload)
             relative = (
                 EXPERIENCE_ROOT
                 / current.asset_id
@@ -362,10 +389,13 @@ class ExperienceRepository:
                 for item in experience.evidence
                 if item.role == "dataset"
             )
+            dataset_payload = self._load_json(
+                self.repository_path / dataset_evidence.asset_path,
+                "invalid_experience_evidence",
+            )
             dataset_matches = (
                 dataset_id is None
-                or dataset_id in dataset_evidence.asset_id
-                or dataset_id in dataset_evidence.asset_path
+                or dataset_payload.get("dataset_id") == dataset_id
             )
             if not dataset_matches:
                 continue
@@ -423,6 +453,9 @@ class ExperienceRepository:
         capacity: CapacityStatus,
     ) -> ExperienceSnapshot | None:
         manifest_path, manifest = instances[instance_id]
+        input_payload = self._instance_input(manifest_path)
+        if input_payload.get("planning_session_id") != session_id:
+            return None
         parent_id = manifest.get("parent_instance_id")
         if not isinstance(parent_id, str) or parent_id not in instances:
             return None
@@ -435,7 +468,6 @@ class ExperienceRepository:
         metric_name = manifest.get("primary_metric_name")
         direction = manifest.get("optimization_direction")
         if not isinstance(direction, str) or not direction.strip():
-            input_payload = self._instance_input(manifest_path)
             direction = input_payload.get("optimization_direction")
         if not isinstance(direction, str) or not direction.strip():
             return None
@@ -508,7 +540,6 @@ class ExperienceRepository:
         if run_start is None:
             return None
         run_path, _ = run_start
-        input_payload = self._instance_input(manifest_path)
         dataset_relative = input_payload.get("dataset_asset_path")
         if not isinstance(dataset_relative, str):
             return None
@@ -559,6 +590,7 @@ class ExperienceRepository:
             "experience_id": experience_id,
             "schema_version": EXPERIENCE_SCHEMA_VERSION,
             "previous_event_id": None,
+            "previous_event_fingerprint": None,
             "state": "pending",
             "content": content.to_dict(),
             "evidence": [item.to_dict() for item in evidence],
@@ -572,7 +604,23 @@ class ExperienceRepository:
             "reviewed_by": None,
             "decision": None,
         }
+        payload["event_fingerprint"] = _fingerprint(payload)
         relative = EXPERIENCE_ROOT / experience_id / f"{event_id}.json"
+        target = self.repository_path / relative
+        if target.exists():
+            existing = self._load_experience(target, experience_id)
+            expected = self._snapshot(payload, relative)
+            if (
+                existing.event_id != expected.event_id
+                or existing.state != "pending"
+                or existing.content != expected.content
+                or existing.evidence != expected.evidence
+                or existing.extraction_session_id != session_id
+                or existing.source_kind != expected.source_kind
+                or existing.created_by != actor_id
+            ):
+                self._invalid_experience(experience_id)
+            return existing
         self._write_new(relative, payload, capacity)
         return self._snapshot(payload, relative)
 
@@ -703,6 +751,17 @@ class ExperienceRepository:
             payload.get("asset_type") != "experience_session_stop"
             or payload.get("session_id") != session_id
             or payload.get("outcome") not in {"created", "no_op"}
+            or not self._id_list(payload.get("candidate_ids"))
+            or not self._id_list(payload.get("new_event_ids"))
+            or not self._id_list(payload.get("new_instance_ids"))
+            or (
+                payload.get("outcome") == "created"
+                and not payload["candidate_ids"]
+            )
+            or (
+                payload.get("outcome") == "no_op"
+                and payload["candidate_ids"]
+            )
         ):
             raise WorkspaceError(
                 code="invalid_experience_session",
@@ -729,7 +788,13 @@ class ExperienceRepository:
             payload.get("asset_type") != "experience_event"
             or payload.get("experience_id") != experience_id
             or payload.get("asset_id") != path.stem
+            or payload.get("schema_version") != EXPERIENCE_SCHEMA_VERSION
         ):
+            self._invalid_experience(experience_id)
+        expected_fingerprint = payload.get("event_fingerprint")
+        canonical = dict(payload)
+        canonical.pop("event_fingerprint", None)
+        if expected_fingerprint != _fingerprint(canonical):
             self._invalid_experience(experience_id)
         snapshot = self._snapshot(
             payload,
@@ -744,7 +809,50 @@ class ExperienceRepository:
                 != item.sha256
             ):
                 self._invalid_evidence(evidence_path)
+            self._validate_evidence_identity(item, evidence_path)
         return snapshot
+
+    def _validate_evidence_identity(
+        self,
+        evidence: ExperienceEvidence,
+        evidence_path: Path,
+    ) -> None:
+        relative = evidence_path.relative_to(self.repository_path)
+        expected_root = EVIDENCE_PATH_ROOTS[evidence.role]
+        if relative.parts[: len(expected_root)] != expected_root:
+            self._invalid_evidence(evidence_path)
+        payload = self._load_json(
+            evidence_path,
+            "invalid_experience_evidence",
+        )
+        valid = False
+        if evidence.role == "dataset":
+            valid = (
+                payload.get("asset_type") == "dataset_version"
+                and payload.get("asset_id") == evidence.asset_id
+                and isinstance(payload.get("dataset_id"), str)
+                and bool(payload["dataset_id"].strip())
+            )
+        elif evidence.role == "run":
+            valid = (
+                payload.get("asset_type") == "run_event"
+                and payload.get("event_type") == "run_started"
+                and payload.get("run_id") == evidence.asset_id
+            )
+        elif evidence.role == "training_instance":
+            valid = (
+                payload.get("asset_type") == "training_instance"
+                and payload.get("asset_id") == evidence.asset_id
+            )
+        elif evidence.role == "raw_record":
+            valid = (
+                payload.get("asset_type") == "run_event"
+                and payload.get("asset_id") == evidence.asset_id
+                and payload.get("event_type")
+                in {"instance_completed", "instance_failed"}
+            )
+        if not valid:
+            self._invalid_evidence(evidence_path)
 
     @staticmethod
     def _snapshot(
@@ -756,7 +864,11 @@ class ExperienceRepository:
                 asset_id=payload["experience_id"],
                 asset_path=relative.as_posix(),
                 event_id=payload["asset_id"],
+                event_fingerprint=payload["event_fingerprint"],
                 previous_event_id=payload["previous_event_id"],
+                previous_event_fingerprint=payload[
+                    "previous_event_fingerprint"
+                ],
                 state=payload["state"],
                 content=ExperienceContent(**payload["content"]),
                 evidence=tuple(
@@ -922,6 +1034,17 @@ class ExperienceRepository:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fingerprint(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _terms(value: str) -> set[str]:

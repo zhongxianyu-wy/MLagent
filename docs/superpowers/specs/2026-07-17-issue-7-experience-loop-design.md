@@ -76,10 +76,16 @@ Instances after successful startup synchronization. Repeated
 and never move the boundary forward. The stop record records examined new
 evidence, created candidate IDs, and `outcome: created|no_op`.
 
+Every Run start and frozen Training Instance input carries the exact
+Exploration Plan `planning_session_id`, which must equal the current Claude
+Code session ID reported by SessionStart. Extraction requires this exact
+identity in addition to the marker set difference, so concurrent sessions
+cannot claim one another's training evidence.
+
 Experience files contain:
 
 - stable Experience ID and unique event ID;
-- state and previous event ID;
+- state, event fingerprint, previous event ID, and previous event fingerprint;
 - conclusion, applicability, recommended action, failure boundary, and risk;
 - numeric confidence from 0 through 1;
 - Dataset, Run, Training Instance, and Raw Record evidence references;
@@ -88,14 +94,20 @@ Experience files contain:
 - optional conflicting or replacement Experience relation.
 
 Every referenced path must resolve inside Team Memory, identify the expected
-asset, and retain its recorded SHA-256. Invalid or missing evidence fails
-closed.
+role-specific `asset_type` and asset or Run ID, and retain its recorded
+SHA-256. Loading also verifies the event schema, fingerprint chain, allowed
+state transition, and unchanged evidence/source identity. Invalid or missing
+history or evidence fails closed.
 
 ## 5. Session Evidence Boundary
 
 `SessionStart` first performs Issue #6 synchronization. On a successful sync,
 Domain Core creates or loads the session start record. This ordering prevents
 the local marker from blocking a safe remote fast-forward.
+
+A new marker is not created after a failed or conflicted remote
+synchronization. An existing same-session marker may be reused without moving
+its boundary, including after an interrupted synchronization.
 
 `Stop` requires the marker and computes set differences against its captured
 Run event and Training Instance IDs. It never selects evidence merely because
@@ -122,6 +134,10 @@ The MVP extractor is deterministic and conservative:
 Candidate identity is deterministic from the extraction session and evidence,
 making repeated `Stop` calls idempotent. No qualifying fact writes a stop
 record with `outcome: no_op`; it does not create an empty Experience.
+If Stop is interrupted after deterministic candidates are published, retry
+verifies and reuses those exact candidates before writing the stop record. A
+repeated completed Stop returns the originally recorded outcome and evidence
+ID lists.
 
 ## 7. Lifecycle
 
@@ -157,6 +173,9 @@ filtering. Results are partitioned into:
 Rejected, Conflict, and Superseded projections are never returned as active
 guidance. Each result includes `why_applicable`, based on matching Dataset,
 metric, optimization direction, and query terms, plus direct evidence.
+The Claude Code workflow obtains these groups through
+`python -m src.agent.main experience search`; Dataset filtering compares the
+exact `dataset_id` in direct evidence rather than path or ID substrings.
 
 An Exploration Plan must:
 

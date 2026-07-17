@@ -31,13 +31,13 @@ class ExperienceWorkspace:
         )
         self.write_dataset()
 
-    def write_dataset(self):
+    def write_dataset(self, dataset_id="dataset-1"):
         self.write_json(
-            "datasets/dataset-1/v0001/manifest.json",
+            f"datasets/{dataset_id}/v0001/manifest.json",
             {
                 "asset_type": "dataset_version",
-                "asset_id": "dataset-1:v1",
-                "dataset_id": "dataset-1",
+                "asset_id": f"{dataset_id}:v1",
+                "dataset_id": dataset_id,
                 "version": 1,
                 "primary_metric": "roc_auc",
                 "created_at": "2026-07-17T00:00:00Z",
@@ -54,6 +54,8 @@ class ExperienceWorkspace:
         direction="feature filtering",
         error_code=None,
         error_summary=None,
+        planning_session_id="session-historical",
+        dataset_id="dataset-1",
     ):
         run_id = "run-1"
         event_prefix = instance_id.replace("instance-", "event-")
@@ -66,6 +68,7 @@ class ExperienceWorkspace:
                     "run_id": run_id,
                     "event_type": "run_started",
                     "state": "running",
+                    "planning_session_id": planning_session_id,
                     "created_at": "2026-07-17T00:00:00Z",
                 },
             )
@@ -75,7 +78,10 @@ class ExperienceWorkspace:
             {
                 "run_id": run_id,
                 "instance_id": instance_id,
-                "dataset_asset_path": "datasets/dataset-1/v0001/manifest.json",
+                "dataset_asset_path": (
+                    f"datasets/{dataset_id}/v0001/manifest.json"
+                ),
+                "planning_session_id": planning_session_id,
                 "hypothesis": f"Evaluate {direction}",
                 "optimization_direction": direction,
                 "intended_changes": [direction],
@@ -133,6 +139,7 @@ def test_session_boundary_extracts_only_new_metric_improvement(
         "instance-new",
         metric=0.8,
         parent_id="instance-old",
+        planning_session_id="session-1",
     )
 
     outcome = workspace.repository.complete_session(
@@ -205,6 +212,7 @@ def test_repeated_stop_reuses_prior_outcome_without_new_files(
         "instance-new",
         metric=0.8,
         parent_id="instance-old",
+        planning_session_id="session-1",
     )
     first = workspace.repository.complete_session(
         "session-1",
@@ -226,10 +234,111 @@ def test_repeated_stop_reuses_prior_outcome_without_new_files(
         path.relative_to(workspace.root).as_posix()
         for path in workspace.root.rglob("*.json")
     )
-    assert second.outcome == "already_completed"
-    assert second.candidate_ids == ()
-    assert first.candidate_ids
+    assert second == first
     assert after == before
+
+
+def test_stop_retry_reuses_candidate_written_before_interruption(
+    experience_workspace,
+    monkeypatch,
+):
+    workspace = experience_workspace
+    workspace.seed_instance("instance-old", metric=0.7)
+    workspace.repository.start_session(
+        "session-retry",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-new",
+        metric=0.8,
+        parent_id="instance-old",
+        planning_session_id="session-retry",
+    )
+    original_write = workspace.repository._write_new
+    interrupted = False
+
+    def interrupt_before_stop(relative, payload, capacity):
+        nonlocal interrupted
+        if (
+            relative.as_posix()
+            == "raw-records/sessions/session-retry/stop.json"
+            and not interrupted
+        ):
+            interrupted = True
+            raise WorkspaceError(
+                code="simulated_stop_interruption",
+                message="Stop write was interrupted.",
+                next_action="Retry Stop.",
+            )
+        return original_write(relative, payload, capacity)
+
+    monkeypatch.setattr(
+        workspace.repository,
+        "_write_new",
+        interrupt_before_stop,
+    )
+    with pytest.raises(WorkspaceError, match="interrupted"):
+        workspace.repository.complete_session(
+            "session-retry",
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+    candidate_files = tuple(
+        (workspace.root / "experiences").rglob("*.json")
+    )
+    assert len(candidate_files) == 1
+
+    monkeypatch.setattr(workspace.repository, "_write_new", original_write)
+    recovered = workspace.repository.complete_session(
+        "session-retry",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+
+    assert recovered.outcome == "created"
+    assert len(recovered.candidate_ids) == 1
+    assert tuple((workspace.root / "experiences").rglob("*.json")) == (
+        candidate_files[0],
+    )
+
+
+def test_concurrent_session_does_not_extract_another_sessions_instance(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.seed_instance("instance-parent", metric=0.7)
+    workspace.repository.start_session(
+        "session-a",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    workspace.repository.start_session(
+        "session-b",
+        actor_id="bob",
+        capacity=workspace.capacity,
+    )
+    workspace.seed_instance(
+        "instance-a",
+        metric=0.8,
+        parent_id="instance-parent",
+        planning_session_id="session-a",
+    )
+
+    unrelated = workspace.repository.complete_session(
+        "session-b",
+        actor_id="bob",
+        capacity=workspace.capacity,
+    )
+    owned = workspace.repository.complete_session(
+        "session-a",
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+
+    assert unrelated.outcome == "no_op"
+    assert owned.outcome == "created"
+    assert len(owned.candidate_ids) == 1
 
 
 def test_failed_child_creates_bounded_failure_experience(experience_workspace):
@@ -248,6 +357,7 @@ def test_failed_child_creates_bounded_failure_experience(experience_workspace):
         direction="batch correction",
         error_code="singular_matrix",
         error_summary="Covariates made the design matrix singular.",
+        planning_session_id="session-failure",
     )
 
     outcome = workspace.repository.complete_session(
@@ -271,7 +381,11 @@ def test_baseline_stopped_and_timed_out_instances_do_not_create_candidates(
         actor_id="alice",
         capacity=workspace.capacity,
     )
-    workspace.seed_instance("instance-baseline", metric=0.7)
+    workspace.seed_instance(
+        "instance-baseline",
+        metric=0.7,
+        planning_session_id="session-noise",
+    )
     workspace.seed_instance(
         "instance-stopped",
         metric=None,
@@ -279,6 +393,7 @@ def test_baseline_stopped_and_timed_out_instances_do_not_create_candidates(
         state="stopped",
         error_code="user_stop",
         error_summary="Stopped by user.",
+        planning_session_id="session-noise",
     )
     workspace.seed_instance(
         "instance-timeout",
@@ -287,6 +402,7 @@ def test_baseline_stopped_and_timed_out_instances_do_not_create_candidates(
         state="timed_out",
         error_code="timeout",
         error_summary="Timed out.",
+        planning_session_id="session-noise",
     )
 
     outcome = workspace.repository.complete_session(
@@ -563,10 +679,65 @@ def test_experience_lifecycle_never_changes_sop_or_model_assets(
     model_path.parent.mkdir(parents=True, exist_ok=True)
     model_path.write_bytes(b"formal-model")
     before = governed_bytes(workspace.root, ("sops", "models"))
-    pending = create_pending(workspace, "session-isolation", "instance-isolation")
-    trusted = approve(workspace, pending)
+    first = create_pending(
+        workspace,
+        "session-isolation-first",
+        "instance-isolation-first",
+    )
+    replacement = approve(
+        workspace,
+        create_pending(
+            workspace,
+            "session-isolation-replacement",
+            "instance-isolation-replacement",
+        ),
+    )
+    trusted = approve(workspace, first)
+    assert governed_bytes(workspace.root, ("sops", "models")) == before
 
-    assert trusted.state == "trusted"
+    workspace.repository.review(
+        ReviewExperienceCommand(
+            Path("unused.json"),
+            trusted.asset_id,
+            "supersede",
+            trusted.content,
+            replacement.asset_id,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+    rejected = create_pending(
+        workspace,
+        "session-isolation-rejected",
+        "instance-isolation-rejected",
+    )
+    workspace.repository.review(
+        ReviewExperienceCommand(
+            Path("unused.json"),
+            rejected.asset_id,
+            "reject",
+            rejected.content,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+    conflicted = create_pending(
+        workspace,
+        "session-isolation-conflict",
+        "instance-isolation-conflict",
+    )
+    workspace.repository.review(
+        ReviewExperienceCommand(
+            Path("unused.json"),
+            conflicted.asset_id,
+            "conflict",
+            conflicted.content,
+            replacement.asset_id,
+        ),
+        actor_id="reviewer",
+        capacity=workspace.capacity,
+    )
+
     assert governed_bytes(workspace.root, ("sops", "models")) == before
 
 
@@ -584,6 +755,57 @@ def test_changed_direct_evidence_invalidates_experience_projection(
         workspace.repository.current(pending.asset_id)
 
 
+def test_evidence_role_must_match_the_cited_asset_identity(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    pending = create_pending(
+        workspace,
+        "session-evidence-identity",
+        "instance-evidence-identity",
+    )
+    event_path = workspace.root / pending.asset_path
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    run_evidence = next(
+        item for item in payload["evidence"] if item["role"] == "run"
+    )
+    run_evidence["asset_id"] = "run-other"
+    write_sealed_event(event_path, payload)
+
+    with pytest.raises(WorkspaceError, match="evidence"):
+        workspace.repository.current(pending.asset_id)
+
+
+def test_history_rejects_a_linear_but_illegal_state_transition(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    pending = create_pending(
+        workspace,
+        "session-illegal-chain",
+        "instance-illegal-chain",
+    )
+    trusted = approve(workspace, pending)
+    trusted_path = workspace.root / trusted.asset_path
+    payload = json.loads(trusted_path.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "asset_id": "experience-event-illegal-chain",
+            "previous_event_id": trusted.event_id,
+            "previous_event_fingerprint": trusted.event_fingerprint,
+            "created_at": "2026-07-17T00:03:00Z",
+            "reviewed_at": "2026-07-17T00:03:00Z",
+        }
+    )
+    write_sealed_event(
+        trusted_path.with_name("experience-event-illegal-chain.json"),
+        payload,
+    )
+
+    with pytest.raises(WorkspaceError, match="invalid"):
+        workspace.repository.current(pending.asset_id)
+
+
 def test_concurrent_review_heads_fail_closed(experience_workspace):
     workspace = experience_workspace
     pending = create_pending(
@@ -598,11 +820,9 @@ def test_concurrent_review_heads_fail_closed(experience_workspace):
     concurrent["state"] = "rejected"
     concurrent["decision"] = "reject"
     concurrent["content"]["conclusion"] = "Concurrent rejection."
-    workspace.write_json(
-        (
-            f"experiences/{pending.asset_id}/"
-            "experience-event-concurrent.json"
-        ),
+    write_sealed_event(
+        workspace.root
+        / f"experiences/{pending.asset_id}/experience-event-concurrent.json",
         concurrent,
     )
 
@@ -670,6 +890,28 @@ def test_search_partitions_trusted_and_optional_low_confidence_guidance(
     assert without_pending[1] == ()
 
 
+def test_dataset_filter_matches_exact_dataset_identity(
+    experience_workspace,
+):
+    workspace = experience_workspace
+    workspace.write_dataset("dataset-10")
+    pending = create_pending(
+        workspace,
+        "session-dataset-10",
+        "instance-dataset-10",
+        dataset_id="dataset-10",
+    )
+    approve(workspace, pending)
+
+    trusted, _ = workspace.repository.search(
+        "feature filtering",
+        dataset_id="dataset-1",
+        include_pending=False,
+    )
+
+    assert trusted == ()
+
+
 def create_pending(
     workspace,
     session_id,
@@ -678,6 +920,7 @@ def create_pending(
     parent_id="instance-parent",
     parent_metric=0.7,
     metric=0.8,
+    dataset_id="dataset-1",
 ):
     if not (
         workspace.root
@@ -693,6 +936,8 @@ def create_pending(
         instance_id,
         metric=metric,
         parent_id=parent_id,
+        planning_session_id=session_id,
+        dataset_id=dataset_id,
     )
     outcome = workspace.repository.complete_session(
         session_id,
@@ -722,3 +967,20 @@ def governed_bytes(root, managed):
         for path in (root / name).rglob("*")
         if path.is_file()
     }
+
+
+def write_sealed_event(path, payload):
+    canonical = dict(payload)
+    canonical.pop("event_fingerprint", None)
+    payload["event_fingerprint"] = hashlib.sha256(
+        json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )

@@ -28,7 +28,7 @@ from src.domain.models import (
 )
 
 
-RUN_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 3
 RUN_EVENT_ROOT = Path("raw-records/runs")
 RUN_ROOT = Path("runs")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,79}$")
@@ -50,6 +50,7 @@ ALLOWED_EVENT_FIELDS = {
     "dataset_version_fingerprint",
     "plan_id",
     "plan_event_id",
+    "planning_session_id",
     "plan_fingerprint",
     "approval_id",
     "approval_fingerprint",
@@ -88,6 +89,7 @@ class RunStartSpec:
     dataset_version_fingerprint: str
     plan_id: str
     plan_event_id: str
+    planning_session_id: str
     plan_fingerprint: str
     approval_id: str
     approval_fingerprint: str
@@ -206,6 +208,7 @@ class RunRepository:
                 "dataset_version_fingerprint": spec.dataset_version_fingerprint,
                 "plan_id": spec.plan_id,
                 "plan_event_id": spec.plan_event_id,
+                "planning_session_id": spec.planning_session_id,
                 "plan_fingerprint": spec.plan_fingerprint,
                 "approval_id": spec.approval_id,
                 "approval_fingerprint": spec.approval_fingerprint,
@@ -366,6 +369,7 @@ class RunRepository:
             ],
             "plan_id": start["plan_id"],
             "plan_event_id": start["plan_event_id"],
+            "planning_session_id": start["planning_session_id"],
             "plan_fingerprint": start["plan_fingerprint"],
             "approval_id": start["approval_id"],
             "approval_fingerprint": start["approval_fingerprint"],
@@ -1468,6 +1472,7 @@ class RunRepository:
             (spec.dataset_id, "Dataset ID"),
             (spec.plan_id, "plan ID"),
             (spec.plan_event_id, "plan event ID"),
+            (spec.planning_session_id, "planning session ID"),
             (spec.approval_id, "approval ID"),
         ):
             self._validate_id(value, label)

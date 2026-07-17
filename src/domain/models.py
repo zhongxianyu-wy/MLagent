@@ -433,7 +433,9 @@ class ExperienceSnapshot:
     asset_id: str
     asset_path: str
     event_id: str
+    event_fingerprint: str
     previous_event_id: str | None
+    previous_event_fingerprint: str | None
     state: str
     content: ExperienceContent
     evidence: tuple[ExperienceEvidence, ...]
@@ -452,6 +454,10 @@ class ExperienceSnapshot:
         _validate_non_empty(self.asset_id, "asset_id")
         _validate_non_empty(self.asset_path, "asset_path")
         _validate_non_empty(self.event_id, "event_id")
+        if _SHA256_PATTERN.fullmatch(self.event_fingerprint) is None:
+            raise ValueError(
+                "event_fingerprint must be a lowercase SHA-256 digest"
+            )
         _validate_state(self.state, _EXPERIENCE_STATES, "state")
         _validate_non_empty(
             self.extraction_session_id,
@@ -471,6 +477,10 @@ class ExperienceSnapshot:
         if self.state == "pending":
             if self.previous_event_id is not None:
                 raise ValueError("pending state cannot have previous_event_id")
+            if self.previous_event_fingerprint is not None:
+                raise ValueError(
+                    "pending state cannot have previous_event_fingerprint"
+                )
             if any(
                 value is not None
                 for value in (
@@ -484,6 +494,17 @@ class ExperienceSnapshot:
                 raise ValueError("pending state cannot contain review or relation fields")
         else:
             _validate_non_empty(self.previous_event_id, "previous_event_id")
+            if (
+                self.previous_event_fingerprint is None
+                or _SHA256_PATTERN.fullmatch(
+                    self.previous_event_fingerprint
+                )
+                is None
+            ):
+                raise ValueError(
+                    "previous_event_fingerprint must be a lowercase "
+                    "SHA-256 digest"
+                )
             _validate_non_empty(self.reviewed_at, "reviewed_at")
             _validate_non_empty(self.reviewed_by, "reviewed_by")
             _validate_non_empty(self.decision, "decision")

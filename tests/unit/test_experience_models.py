@@ -48,7 +48,9 @@ def snapshot(**updates) -> ExperienceSnapshot:
         "asset_id": "experience-1",
         "asset_path": "experiences/experience-1/event-1.json",
         "event_id": "event-1",
+        "event_fingerprint": "e" * 64,
         "previous_event_id": None,
+        "previous_event_fingerprint": None,
         "state": "pending",
         "content": content(),
         "evidence": evidence(),
@@ -115,7 +117,22 @@ def test_relation_fields_are_paired_and_state_specific():
 
 def test_reviewed_state_requires_audit_fields():
     with pytest.raises(ValueError, match="reviewed_at"):
-        snapshot(state="trusted", previous_event_id="event-0")
+        snapshot(
+            state="trusted",
+            previous_event_id="event-0",
+            previous_event_fingerprint="d" * 64,
+        )
+
+
+def test_event_fingerprint_must_chain_with_previous_event():
+    with pytest.raises(ValueError, match="previous_event_fingerprint"):
+        snapshot(
+            state="trusted",
+            previous_event_id="event-0",
+            reviewed_at="2026-07-17T00:01:00Z",
+            reviewed_by="reviewer",
+            decision="approve",
+        )
 
 
 def test_review_command_rejects_empty_reviewer_content():
@@ -143,6 +160,7 @@ def test_commands_and_results_are_immutable_and_json_safe():
         experience=snapshot(
             state="trusted",
             previous_event_id="event-1",
+            previous_event_fingerprint="d" * 64,
             reviewed_at="2026-07-17T00:01:00Z",
             reviewed_by="reviewer",
             decision="approve",

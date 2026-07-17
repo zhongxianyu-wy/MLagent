@@ -26,6 +26,8 @@ def main(
         return _intake_data(args, domain_core_factory=domain_core_factory)
     if args[0] == "design-and-explore":
         return _design_and_explore(args, domain_core_factory=domain_core_factory)
+    if args[0] == "experience":
+        return _experience(args, domain_core_factory=domain_core_factory)
     if args[0] == "status":
         return 0
     if args[0] == "intake":
@@ -610,6 +612,58 @@ def _design_and_explore(
         return 2
 
     print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _experience(
+    args: list[str],
+    domain_core_factory: Callable[[], object] | None = None,
+) -> int:
+    from src.domain.core import DomainCore
+    from src.domain.models import WorkspaceError
+
+    try:
+        if len(args) < 2 or args[1] != "search":
+            raise WorkspaceError(
+                code="invalid_experience_action",
+                message="experience requires the search action.",
+                next_action="Run experience search with a non-empty query.",
+            )
+        top_k = int(_option(args, "--top-k", "5"))
+        core = domain_core_factory() if domain_core_factory else DomainCore()
+        trusted, pending = core.search_experiences(
+            Path(
+                _option(
+                    args,
+                    "--workspace-config",
+                    ".mlagent-workspace.json",
+                )
+            ),
+            _required_option(args, "--query"),
+            dataset_id=_option(args, "--dataset-id", None),
+            include_pending="--include-pending" in args,
+            top_k=top_k,
+        )
+    except WorkspaceError as error:
+        _print_workspace_error(error.code, error.message, error.next_action)
+        return 2
+    except (TypeError, ValueError) as error:
+        _print_workspace_error(
+            "invalid_arguments",
+            str(error),
+            "Check Experience search arguments and retry.",
+        )
+        return 2
+    print(
+        json.dumps(
+            {
+                "trusted": [item.to_dict() for item in trusted],
+                "pending": [item.to_dict() for item in pending],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
