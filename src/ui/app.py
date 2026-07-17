@@ -740,8 +740,62 @@ def _render_sop_versions(
             for item in versions
             if item.sop_id == selected.sop_id
         ]
-    ).set_index("Version")
-    st.line_chart(trend, height=260, width="stretch")
+    )
+    version_min = float(trend["Version"].min())
+    version_max = float(trend["Version"].max())
+    if version_min == version_max:
+        version_min -= 0.5
+        version_max += 0.5
+    metric_min = float(trend["Primary metric"].min())
+    metric_max = float(trend["Primary metric"].max())
+    metric_padding = max(
+        (metric_max - metric_min) * 0.1,
+        abs(metric_max) * 0.02,
+        0.001,
+    )
+    st.vega_lite_chart(
+        trend,
+        {
+            "mark": (
+                {"type": "point", "filled": True, "size": 100}
+                if len(trend) == 1
+                else {
+                    "type": "line",
+                    "point": {"filled": True, "size": 70},
+                }
+            ),
+            "encoding": {
+                "x": {
+                    "field": "Version",
+                    "type": "quantitative",
+                    "scale": {"domain": [version_min, version_max]},
+                    "axis": {"title": "SOP Version", "tickMinStep": 1},
+                },
+                "y": {
+                    "field": "Primary metric",
+                    "type": "quantitative",
+                    "scale": {
+                        "domain": [
+                            metric_min - metric_padding,
+                            metric_max + metric_padding,
+                        ],
+                        "zero": False,
+                    },
+                    "axis": {"title": selected.primary_metric_name},
+                },
+                "tooltip": [
+                    {"field": "Version", "type": "quantitative"},
+                    {
+                        "field": "Primary metric",
+                        "type": "quantitative",
+                        "format": ".6f",
+                    },
+                ],
+            },
+        },
+        height=260,
+        width="stretch",
+    )
 
 
 def _render_action_error(error: ValueError | WorkspaceError) -> None:
