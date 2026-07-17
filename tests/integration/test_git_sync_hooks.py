@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,7 +67,7 @@ def configured_hook_workspace(tmp_path: Path) -> ConfiguredHookWorkspace:
     environment = {
         **os.environ,
         "CLAUDE_PROJECT_DIR": str(PROJECT_ROOT),
-        "MLAGENT_PYTHON": str(PROJECT_ROOT / ".venv/bin/python"),
+        "MLAGENT_PYTHON": sys.executable,
         "MLAGENT_WORKSPACE_CONFIG": str(connection),
     }
     return ConfiguredHookWorkspace(
