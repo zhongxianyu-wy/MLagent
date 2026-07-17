@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import re
 import shutil
 import uuid
@@ -17,6 +18,7 @@ from src.domain.models import (
     CapacityStatus,
     SopCandidateSnapshot,
     SopEvidenceReference,
+    SopReproductionGateSnapshot,
     WorkspaceError,
 )
 from src.domain.run_repository import RunRepository
@@ -24,6 +26,7 @@ from src.domain.run_repository import RunRepository
 
 SOP_SCHEMA_VERSION = 1
 SOP_CANDIDATE_ROOT = Path("sops/candidates")
+SOP_REPRODUCTION_ROOT = Path("approvals/sop-reproductions")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 INSTANCE_FILE_ROLES = {
     "input": "input",
@@ -69,11 +72,32 @@ class SopCandidateSpec:
             raise ValueError("change_summary must be a string")
 
 
+@dataclass(frozen=True)
+class SopReproductionGateSpec:
+    candidate_id: str
+    candidate_fingerprint: str
+    outcome: str
+    source_run_id: str
+    source_instance_id: str
+    source_instance_fingerprint: str
+    reproduction_run_id: str
+    reproduction_instance_id: str
+    reproduction_instance_fingerprint: str
+    source_metric_value: float
+    reproduction_metric_value: float | None
+    source_metric_six_decimals: str
+    reproduction_metric_six_decimals: str | None
+    reproduction_model_path: str | None
+    reproduction_model_fingerprint: str | None
+    comparisons: dict[str, bool]
+
+
 class SopRepository:
     def __init__(
         self,
         repository_path: Path,
         candidate_id_factory: Callable[[], str] | None = None,
+        gate_id_factory: Callable[[], str] | None = None,
         clock: Callable[[], str] | None = None,
     ) -> None:
         unresolved = repository_path.expanduser()
@@ -82,6 +106,9 @@ class SopRepository:
         self.repository_path = unresolved.resolve()
         self.candidate_id_factory = candidate_id_factory or (
             lambda: f"candidate-{uuid.uuid4()}"
+        )
+        self.gate_id_factory = gate_id_factory or (
+            lambda: f"sop-gate-{uuid.uuid4()}"
         )
         self.clock = clock or _utc_now
 
@@ -262,6 +289,236 @@ class SopRepository:
                 reverse=True,
             )
         )
+
+    def validate_candidate_source(
+        self,
+        candidate_id: str,
+        expected_fingerprint: str | None = None,
+    ) -> SopCandidateSnapshot:
+        candidate = self.load_candidate(candidate_id)
+        if (
+            expected_fingerprint is not None
+            and candidate.candidate_fingerprint != expected_fingerprint
+        ):
+            raise WorkspaceError(
+                code="stale_sop_candidate",
+                message="SOP candidate fingerprint changed before reproduction.",
+                next_action="Reload the candidate and review its evidence again.",
+            )
+        spec = SopCandidateSpec(
+            sop_id=candidate.sop_id,
+            name=candidate.name,
+            source_run_id=candidate.source_run_id,
+            source_instance_id=candidate.source_instance_id,
+            strategy_summary=candidate.strategy_summary,
+            optimization_background=candidate.optimization_background,
+            steps=candidate.steps,
+            change_summary=candidate.change_summary,
+        )
+        source = self._collect_source(spec)
+        payload = self._load_json(
+            self.repository_path / candidate.asset_path,
+            "invalid_sop_candidate",
+        )
+        expected = {
+            "source_instance_fingerprint": source[
+                "source_instance_fingerprint"
+            ],
+            "dataset_id": source["dataset"].dataset_id,
+            "dataset_version": source["dataset"].version,
+            "dataset_content_fingerprint": source[
+                "dataset"
+            ].content_fingerprint,
+            "dataset_version_fingerprint": source[
+                "dataset"
+            ].version_fingerprint,
+            "code_fingerprint": source["instance"].code_fingerprint,
+            "configuration_fingerprint": source[
+                "instance"
+            ].configuration_fingerprint,
+            "environment_fingerprint": source[
+                "instance"
+            ].environment_fingerprint,
+            "split_fingerprint": source["instance"].split_fingerprint,
+            "random_seed": source["instance"].random_seed,
+            "primary_metric_name": source["instance"].primary_metric_name,
+            "source_metric_value": source["instance"].primary_metric_value,
+            "source_model_fingerprint": source[
+                "instance"
+            ].model_fingerprint,
+            "evidence": [item.to_dict() for item in source["evidence"]],
+        }
+        if any(payload.get(key) != value for key, value in expected.items()):
+            raise WorkspaceError(
+                code="invalid_sop_candidate_evidence",
+                message="SOP candidate no longer matches its source evidence.",
+                next_action="Restore the candidate and source assets from Git.",
+            )
+        return candidate
+
+    def record_reproduction_gate(
+        self,
+        spec: SopReproductionGateSpec,
+        actor_id: str,
+        capacity: CapacityStatus,
+    ) -> SopReproductionGateSnapshot:
+        self._validate_actor(actor_id)
+        candidate = self.validate_candidate_source(
+            spec.candidate_id,
+            spec.candidate_fingerprint,
+        )
+        if candidate.source_run_id != spec.source_run_id or (
+            candidate.source_instance_id != spec.source_instance_id
+        ):
+            raise WorkspaceError(
+                code="invalid_sop_reproduction",
+                message="Reproduction gate source does not match the candidate.",
+                next_action="Discard the gate attempt and reproduce the selected candidate.",
+            )
+        with self._lock():
+            existing = self.load_gate_for_candidate(spec.candidate_id)
+            if existing is not None:
+                if (
+                    existing.candidate_fingerprint == spec.candidate_fingerprint
+                    and existing.source_run_id == spec.source_run_id
+                    and existing.source_instance_id == spec.source_instance_id
+                    and existing.reproduction_run_id == spec.reproduction_run_id
+                    and existing.reproduction_instance_id
+                    == spec.reproduction_instance_id
+                    and existing.outcome == spec.outcome
+                ):
+                    return existing
+                raise WorkspaceError(
+                    code="sop_gate_exists",
+                    message="A different reproduction gate already exists for this candidate.",
+                    next_action="Create a new SOP candidate before another reproduction.",
+                )
+            gate_id = self._new_gate_id()
+            relative = (
+                SOP_REPRODUCTION_ROOT
+                / spec.candidate_id
+                / f"{gate_id}.json"
+            )
+            payload: dict[str, Any] = {
+                "asset_type": "sop_reproduction_gate",
+                "asset_id": gate_id,
+                "schema_version": SOP_SCHEMA_VERSION,
+                "candidate_id": spec.candidate_id,
+                "candidate_fingerprint": spec.candidate_fingerprint,
+                "outcome": spec.outcome,
+                "source_run_id": spec.source_run_id,
+                "source_instance_id": spec.source_instance_id,
+                "source_instance_fingerprint": spec.source_instance_fingerprint,
+                "reproduction_run_id": spec.reproduction_run_id,
+                "reproduction_instance_id": spec.reproduction_instance_id,
+                "reproduction_instance_fingerprint": (
+                    spec.reproduction_instance_fingerprint
+                ),
+                "source_metric_value": spec.source_metric_value,
+                "reproduction_metric_value": spec.reproduction_metric_value,
+                "source_metric_six_decimals": (
+                    spec.source_metric_six_decimals
+                ),
+                "reproduction_metric_six_decimals": (
+                    spec.reproduction_metric_six_decimals
+                ),
+                "reproduction_model_path": spec.reproduction_model_path,
+                "reproduction_model_fingerprint": (
+                    spec.reproduction_model_fingerprint
+                ),
+                "comparisons": dict(sorted(spec.comparisons.items())),
+                "created_at": self._timestamp(),
+                "created_by": actor_id,
+            }
+            payload["gate_fingerprint"] = _fingerprint(payload)
+            raw = _json_bytes(payload)
+            self._write_new_file(
+                self.repository_path / relative,
+                raw,
+                capacity,
+            )
+            return self.load_gate(gate_id, spec.candidate_id)
+
+    def load_gate(
+        self,
+        gate_id: str,
+        candidate_id: str,
+    ) -> SopReproductionGateSnapshot:
+        self._validate_id(gate_id, "gate_id")
+        self._validate_id(candidate_id, "candidate_id")
+        relative = SOP_REPRODUCTION_ROOT / candidate_id / f"{gate_id}.json"
+        payload = self._load_json(
+            self.repository_path / relative,
+            "invalid_sop_reproduction_gate",
+        )
+        canonical = dict(payload)
+        fingerprint = canonical.pop("gate_fingerprint", None)
+        if (
+            payload.get("asset_type") != "sop_reproduction_gate"
+            or payload.get("asset_id") != gate_id
+            or payload.get("candidate_id") != candidate_id
+            or payload.get("schema_version") != SOP_SCHEMA_VERSION
+            or fingerprint != _fingerprint(canonical)
+            or not isinstance(payload.get("comparisons"), dict)
+            or any(
+                not isinstance(value, bool)
+                for value in payload.get("comparisons", {}).values()
+            )
+        ):
+            self._invalid_gate(gate_id)
+        try:
+            return SopReproductionGateSnapshot(
+                asset_id=payload["asset_id"],
+                asset_path=relative.as_posix(),
+                candidate_id=payload["candidate_id"],
+                candidate_fingerprint=payload["candidate_fingerprint"],
+                gate_fingerprint=payload["gate_fingerprint"],
+                outcome=payload["outcome"],
+                source_run_id=payload["source_run_id"],
+                source_instance_id=payload["source_instance_id"],
+                reproduction_run_id=payload["reproduction_run_id"],
+                reproduction_instance_id=payload[
+                    "reproduction_instance_id"
+                ],
+                source_metric_value=float(payload["source_metric_value"]),
+                reproduction_metric_value=(
+                    None
+                    if payload["reproduction_metric_value"] is None
+                    else float(payload["reproduction_metric_value"])
+                ),
+                source_metric_six_decimals=payload[
+                    "source_metric_six_decimals"
+                ],
+                reproduction_metric_six_decimals=payload[
+                    "reproduction_metric_six_decimals"
+                ],
+                created_at=payload["created_at"],
+                created_by=payload["created_by"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise WorkspaceError(
+                code="invalid_sop_reproduction_gate",
+                message=f"SOP reproduction gate is invalid: {gate_id}.",
+                next_action="Restore the immutable gate from Git.",
+            ) from error
+
+    def load_gate_for_candidate(
+        self,
+        candidate_id: str,
+    ) -> SopReproductionGateSnapshot | None:
+        self._validate_id(candidate_id, "candidate_id")
+        root = self.repository_path / SOP_REPRODUCTION_ROOT / candidate_id
+        self._validate_path(root)
+        if not root.is_dir():
+            return None
+        paths = sorted(root.glob("*.json"))
+        if len(paths) != 1:
+            raise WorkspaceError(
+                code="invalid_sop_reproduction_gate",
+                message="A candidate must have at most one reproduction gate.",
+                next_action="Restore the append-only gate history from Git.",
+            )
+        return self.load_gate(paths[0].stem, candidate_id)
 
     def _collect_source(self, spec: SopCandidateSpec) -> dict[str, Any]:
         raw_manifest = self._preflight_instance(spec)
@@ -676,6 +933,33 @@ class SopRepository:
                 next_action="Check Team Memory permissions and retry candidate creation.",
             ) from error
 
+    def _write_new_file(
+        self,
+        target: Path,
+        raw: bytes,
+        capacity: CapacityStatus,
+    ) -> None:
+        self._validate_path(target)
+        self._validate_capacity(target, raw, capacity)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise WorkspaceError(
+                code="sop_asset_exists",
+                message=f"SOP asset already exists: {target.name}.",
+                next_action="Load the existing immutable asset.",
+            )
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(raw)
+            os.replace(temporary, target)
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            raise WorkspaceError(
+                code="sop_asset_write_failed",
+                message="SOP asset could not be written atomically.",
+                next_action="Check Team Memory permissions and retry.",
+            ) from error
+
     def _validate_capacity(
         self,
         target: Path,
@@ -759,6 +1043,11 @@ class SopRepository:
         self._validate_id(value, "candidate_id")
         return value
 
+    def _new_gate_id(self) -> str:
+        value = self.gate_id_factory()
+        self._validate_id(value, "gate_id")
+        return value
+
     def _timestamp(self) -> str:
         value = self.clock()
         if not isinstance(value, str) or not value.strip():
@@ -787,6 +1076,14 @@ class SopRepository:
             code="invalid_sop_candidate",
             message=f"SOP candidate is invalid: {candidate_id}.",
             next_action="Restore the immutable candidate from Git.",
+        )
+
+    @staticmethod
+    def _invalid_gate(gate_id: str) -> None:
+        raise WorkspaceError(
+            code="invalid_sop_reproduction_gate",
+            message=f"SOP reproduction gate is invalid: {gate_id}.",
+            next_action="Restore the immutable gate from Git.",
         )
 
     @staticmethod

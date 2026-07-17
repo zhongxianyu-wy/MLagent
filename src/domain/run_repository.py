@@ -37,7 +37,12 @@ SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 SAFE_PATH_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 TERMINAL_RUN_STATES = {"completed", "failed", "timed_out", "stopped"}
 TERMINAL_INSTANCE_STATES = {"completed", "failed", "timed_out", "stopped"}
-MODEL_RETENTION_REASONS = {"baseline", "stage_best", "human_marked"}
+MODEL_RETENTION_REASONS = {
+    "baseline",
+    "stage_best",
+    "human_marked",
+    "sop_reproduction",
+}
 ALLOWED_EVENT_FIELDS = {
     "asset_type",
     "asset_id",
