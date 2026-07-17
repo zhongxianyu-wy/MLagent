@@ -553,6 +553,32 @@ def test_stale_reviewer_policy_fingerprint_cannot_approve(tmp_path):
     assert repository.list_sop_versions(candidate.sop_id) == ()
 
 
+def test_deleting_committed_reviewer_policy_cannot_activate_fallback(tmp_path):
+    workspace = build_sop_workspace(tmp_path)
+    repository = promotion_repository(workspace)
+    candidate = repository.create_candidate(
+        candidate_spec(workspace),
+        actor_id="alice",
+        capacity=workspace.capacity,
+    )
+    gate = make_coordinator(
+        workspace,
+        repository,
+        DeterministicExecutor(),
+    )[0].reproduce(candidate)
+    (workspace.root / REVIEWER_POLICY_PATH).unlink()
+
+    with pytest.raises(WorkspaceError) as caught:
+        repository.review_candidate(
+            review_spec(candidate, gate),
+            actor_id="alice",
+            capacity=workspace.capacity,
+        )
+
+    assert caught.value.code == "reviewer_policy_uncommitted"
+    assert repository.list_sop_versions(candidate.sop_id) == ()
+
+
 def test_unauthorized_approval_creates_no_formal_assets(tmp_path):
     workspace = build_sop_workspace(tmp_path)
     repository = promotion_repository(workspace)

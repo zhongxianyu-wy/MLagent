@@ -975,10 +975,15 @@ def validate_reviewer_policy_for_approval(
     repository_path: Path,
     expected_fingerprint: str,
 ) -> tuple[str, ...]:
-    reviewers, fingerprint = _load_reviewer_policy(repository_path)
     root = repository_path.expanduser().resolve()
-    if (root / REVIEWER_POLICY_PATH).exists():
-        _validate_reviewer_policy_committed(root)
+    manifest = MemoryRepository._load_manifest(root / MANIFEST_PATH)
+    MemoryRepository._validate_manifest(manifest)
+    committed = _load_committed_reviewer_policy(root)
+    if committed is None:
+        reviewers, fingerprint = _fallback_reviewer_policy(manifest)
+    else:
+        reviewers = tuple(committed["reviewer_ids"])
+        fingerprint = committed["policy_fingerprint"]
     if fingerprint != expected_fingerprint:
         raise WorkspaceError(
             code="stale_reviewer_policy",
@@ -999,21 +1004,7 @@ def _load_reviewer_policy(
     MemoryRepository._validate_manifest(manifest)
     policy_path = root / REVIEWER_POLICY_PATH
     if not policy_path.exists():
-        reviewers = (manifest["created_by"],)
-        fallback = {
-            "repository_id": manifest["repository_id"],
-            "reviewer_ids": list(reviewers),
-            "source": "schema-1-creator-default",
-        }
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                fallback,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            ).encode("utf-8")
-        ).hexdigest()
-        return reviewers, fingerprint
+        return _fallback_reviewer_policy(manifest)
     try:
         if policy_path.is_symlink() or not policy_path.resolve(
             strict=True
@@ -1036,8 +1027,48 @@ def _load_reviewer_policy(
     return tuple(payload["reviewer_ids"]), payload["policy_fingerprint"]
 
 
-def _validate_reviewer_policy_committed(root: Path) -> None:
+def _fallback_reviewer_policy(
+    manifest: dict[str, Any],
+) -> tuple[tuple[str, ...], str]:
+    reviewers = (manifest["created_by"],)
+    fallback = {
+        "repository_id": manifest["repository_id"],
+        "reviewer_ids": list(reviewers),
+        "source": "schema-1-creator-default",
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fallback,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return reviewers, fingerprint
+
+
+def _load_committed_reviewer_policy(
+    root: Path,
+) -> dict[str, Any] | None:
     try:
+        head_before = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        committed = subprocess.run(
+            [
+                "git",
+                "show",
+                f"{head_before.stdout.strip()}:{REVIEWER_POLICY_PATH.as_posix()}",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         status = subprocess.run(
             [
                 "git",
@@ -1052,13 +1083,8 @@ def _validate_reviewer_policy_committed(root: Path) -> None:
             text=True,
             check=False,
         )
-        committed = subprocess.run(
-            [
-                "git",
-                "cat-file",
-                "-e",
-                f"HEAD:{REVIEWER_POLICY_PATH.as_posix()}",
-            ],
+        head_after = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -1072,7 +1098,12 @@ def _validate_reviewer_policy_committed(root: Path) -> None:
                 "Restore Git access before reviewing an SOP candidate."
             ),
         ) from error
-    if status.returncode != 0 or committed.returncode not in {0, 1, 128}:
+    if (
+        head_before.returncode != 0
+        or head_after.returncode != 0
+        or status.returncode != 0
+        or committed.returncode not in {0, 1, 128}
+    ):
         raise WorkspaceError(
             code="invalid_repository",
             message="Reviewer policy Git state could not be validated.",
@@ -1080,15 +1111,50 @@ def _validate_reviewer_policy_committed(root: Path) -> None:
                 "Restore valid Git metadata before reviewing an SOP candidate."
             ),
         )
-    if status.stdout.strip() or committed.returncode != 0:
+    if head_before.stdout.strip() != head_after.stdout.strip():
         raise WorkspaceError(
-            code="reviewer_policy_uncommitted",
-            message="Reviewer policy is not the committed Team Memory revision.",
-            next_action=(
-                "Restore the policy from HEAD or complete its authorized Git "
-                "review and commit before approving an SOP."
-            ),
+            code="stale_reviewer_policy",
+            message="The committed reviewer policy changed during SOP review.",
+            next_action="Reload SOP Overview before deciding.",
         )
+    policy_path = root / REVIEWER_POLICY_PATH
+    if committed.returncode != 0:
+        if status.stdout.strip() or policy_path.exists():
+            _uncommitted_reviewer_policy()
+        return None
+    try:
+        current = policy_path.read_text(encoding="utf-8")
+    except OSError:
+        _uncommitted_reviewer_policy()
+    if (
+        status.stdout.strip()
+        or policy_path.is_symlink()
+        or current != committed.stdout
+    ):
+        _uncommitted_reviewer_policy()
+    try:
+        payload = json.loads(committed.stdout)
+    except json.JSONDecodeError as error:
+        raise _invalid_reviewer_policy(
+            "Committed reviewer policy is not readable JSON."
+        ) from error
+    if not isinstance(payload, dict):
+        raise _invalid_reviewer_policy(
+            "Committed reviewer policy must be a JSON object."
+        )
+    MemoryRepository._validate_reviewer_policy(payload)
+    return payload
+
+
+def _uncommitted_reviewer_policy() -> None:
+    raise WorkspaceError(
+        code="reviewer_policy_uncommitted",
+        message="Reviewer policy is not the committed Team Memory revision.",
+        next_action=(
+            "Restore the policy from HEAD or complete its authorized Git "
+            "review and commit before approving an SOP."
+        ),
+    )
 
 
 def _invalid_reviewer_policy(message: str) -> WorkspaceError:
