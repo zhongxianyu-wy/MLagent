@@ -25,6 +25,11 @@ from src.ui.shell import (
     build_shell_state,
     sync_detail,
 )
+from tests.unit.test_sop_models import (
+    candidate_snapshot,
+    gate_snapshot,
+    version_snapshot,
+)
 
 
 def workspace_snapshot() -> WorkspaceSnapshot:
@@ -293,6 +298,46 @@ def test_shell_projects_experience_review_state_and_items():
         experiences=(experience_snapshot("experience-rejected", "rejected"),),
     )
     assert rejected.module_status["Experience Review"] == "Rejected"
+
+
+def test_shell_projects_sop_candidate_and_version_statuses():
+    from src.domain.models import SopCandidateStatus
+
+    pending = SopCandidateStatus(
+        candidate=candidate_snapshot(),
+        gate=None,
+        state="pending_reproduction",
+    )
+    shell = build_shell_state(
+        workspace_snapshot(),
+        sop_candidates=(pending,),
+    )
+    assert shell.module_status["SOP Overview"] == "Pending review"
+    assert shell.sop_candidates == (pending,)
+
+    failed_gate = replace(
+        gate_snapshot(),
+        outcome="metric_mismatch",
+        reproduction_metric_value=0.7,
+        reproduction_metric_six_decimals="0.700000",
+    )
+    failed = SopCandidateStatus(
+        candidate=candidate_snapshot(),
+        gate=failed_gate,
+        state="reproduction_failed",
+    )
+    failed_shell = build_shell_state(
+        workspace_snapshot(),
+        sop_candidates=(failed,),
+    )
+    assert failed_shell.module_status["SOP Overview"] == "Failed"
+
+    approved = build_shell_state(
+        workspace_snapshot(),
+        sop_versions=(version_snapshot(),),
+    )
+    assert approved.module_status["SOP Overview"] == "Approved"
+    assert approved.sop_versions == (version_snapshot(),)
 
 
 def exploration_review(state: str) -> ExplorationReviewSnapshot:

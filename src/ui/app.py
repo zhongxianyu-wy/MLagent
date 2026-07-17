@@ -16,6 +16,7 @@ from src.domain.core import DomainCore
 from src.domain.models import (
     ApproveExplorationPlanCommand,
     AuthorizeTrainingCommand,
+    CreateSopCandidateCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
     ExperienceContent,
@@ -23,9 +24,13 @@ from src.domain.models import (
     ExplorationReviewSnapshot,
     InspectDatasetCommand,
     RecoverRunCommand,
+    ReproduceSopCandidateCommand,
     RequestRunStopCommand,
     ReviewExperienceCommand,
+    ReviewSopCandidateCommand,
     RunStatusSnapshot,
+    SopCandidateStatus,
+    SopVersionSnapshot,
     WorkspaceError,
 )
 from src.ui.shell import (
@@ -58,6 +63,8 @@ def main() -> None:
         )
         run_statuses = core.list_run_statuses(connection_path)
         experiences = core.list_experiences(connection_path)
+        sop_candidates = core.list_sop_candidate_statuses(connection_path)
+        sop_versions = core.list_sop_versions(connection_path)
     except WorkspaceError as error:
         st.error(error.message)
         st.caption(error.next_action)
@@ -71,6 +78,8 @@ def main() -> None:
         exploration_review,
         run_statuses,
         experiences,
+        sop_candidates,
+        sop_versions,
     )
     with st.sidebar:
         st.title("MLagent")
@@ -117,6 +126,14 @@ def main() -> None:
             core,
             connection_path,
             shell.experiences,
+        )
+    elif selected_module == "SOP Overview":
+        _render_sop_overview(
+            core,
+            connection_path,
+            shell.run_statuses,
+            shell.sop_candidates,
+            shell.sop_versions,
         )
 
     for issue in shell.issues:
@@ -442,6 +459,297 @@ def _render_run_status(
                     f"Authorized for Issue #5 execution: "
                     f"{authorization.approval_id}"
                 )
+
+
+def _render_sop_overview(
+    core: DomainCore,
+    connection_path: Path,
+    run_statuses: tuple[RunStatusSnapshot, ...],
+    candidates: tuple[SopCandidateStatus, ...],
+    versions: tuple[SopVersionSnapshot, ...],
+) -> None:
+    candidate_tab, version_tab = st.tabs(
+        ("Candidates", "Approved Versions")
+    )
+    with candidate_tab:
+        _render_sop_candidate_workspace(
+            core,
+            connection_path,
+            run_statuses,
+            candidates,
+        )
+    with version_tab:
+        _render_sop_versions(core, connection_path, versions)
+
+
+def _render_sop_candidate_workspace(
+    core: DomainCore,
+    connection_path: Path,
+    run_statuses: tuple[RunStatusSnapshot, ...],
+    candidates: tuple[SopCandidateStatus, ...],
+) -> None:
+    eligible = tuple(
+        (status.run_id, round_status.instance_id)
+        for status in run_statuses
+        for round_status in status.rounds
+        if round_status.instance_state == "completed"
+        and bool(round_status.model_retention_reasons)
+        and "sop_reproduction"
+        not in round_status.model_retention_reasons
+    )
+    source_labels = {
+        source: f"{source[0]} · {source[1]}" for source in eligible
+    }
+    with st.form("create_sop_candidate"):
+        source = st.selectbox(
+            "Source Training Instance",
+            eligible,
+            format_func=lambda value: source_labels[value],
+            index=0 if eligible else None,
+            placeholder="Select a retained successful instance",
+            disabled=not eligible,
+        )
+        identity_columns = st.columns(2)
+        with identity_columns[0]:
+            sop_id = st.text_input("SOP ID")
+        with identity_columns[1]:
+            name = st.text_input("SOP name")
+        strategy_summary = st.text_area("Strategy summary")
+        optimization_background = st.text_area(
+            "Optimization background"
+        )
+        steps_text = st.text_area("Steps")
+        change_summary = st.text_area("Change summary")
+        create = st.form_submit_button(
+            "Create candidate",
+            type="primary",
+            disabled=source is None,
+        )
+    if create and source is not None:
+        steps = tuple(
+            line.strip()
+            for line in steps_text.splitlines()
+            if line.strip()
+        )
+        try:
+            core.create_sop_candidate(
+                CreateSopCandidateCommand(
+                    connection_path=connection_path,
+                    sop_id=sop_id,
+                    name=name,
+                    source_run_id=source[0],
+                    source_instance_id=source[1],
+                    strategy_summary=strategy_summary,
+                    optimization_background=optimization_background,
+                    steps=steps,
+                    change_summary=change_summary,
+                )
+            )
+        except (ValueError, WorkspaceError) as error:
+            _render_action_error(error)
+        else:
+            st.rerun()
+
+    if not candidates:
+        st.info("No SOP candidates")
+        return
+    labels = {
+        item.candidate.asset_id: (
+            f"{item.candidate.name} · {_state_label(item.state)} · "
+            f"{item.candidate.created_at}"
+        )
+        for item in candidates
+    }
+    selected_id = st.selectbox(
+        "SOP candidate",
+        tuple(labels),
+        format_func=lambda value: labels[value],
+    )
+    selected = next(
+        item for item in candidates if item.candidate.asset_id == selected_id
+    )
+    candidate = selected.candidate
+    summary_columns = st.columns(4)
+    summary = (
+        ("State", _state_label(selected.state)),
+        ("Dataset", f"{candidate.dataset_id} v{candidate.dataset_version}"),
+        ("Metric", candidate.primary_metric_name),
+        ("Source value", f"{candidate.source_metric_value:.6f}"),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.markdown(f"**{candidate.asset_id}**")
+    st.caption(
+        f"{candidate.source_run_id} · {candidate.source_instance_id} · "
+        f"seed {candidate.random_seed}"
+    )
+    st.markdown("**Strategy summary**")
+    st.write(candidate.strategy_summary)
+    st.markdown("**Optimization background**")
+    st.write(candidate.optimization_background)
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Step": list(range(1, len(candidate.steps) + 1)),
+                "Method": list(candidate.steps),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Role": item.role,
+                    "Asset": item.asset_id,
+                    "Path": item.asset_path,
+                    "SHA-256": item.sha256,
+                }
+                for item in candidate.evidence
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    if selected.gate is not None:
+        gate = selected.gate
+        st.markdown(f"**Reproduction gate: {_state_label(gate.outcome)}**")
+        gate_columns = st.columns(3)
+        gate_summary = (
+            ("Source", gate.source_metric_six_decimals),
+            (
+                "Reproduction",
+                gate.reproduction_metric_six_decimals or "Unavailable",
+            ),
+            ("Run", gate.reproduction_run_id),
+        )
+        for column, (label, value) in zip(gate_columns, gate_summary):
+            with column:
+                st.metric(label, value)
+    if selected.state == "pending_reproduction":
+        if st.button("Run independent reproduction", type="primary"):
+            try:
+                with st.spinner("Running independent reproduction"):
+                    core.reproduce_sop_candidate(
+                        ReproduceSopCandidateCommand(
+                            connection_path=connection_path,
+                            candidate_id=candidate.asset_id,
+                            expected_candidate_fingerprint=(
+                                candidate.candidate_fingerprint
+                            ),
+                        )
+                    )
+            except (ValueError, WorkspaceError) as error:
+                _render_action_error(error)
+            else:
+                st.rerun()
+    elif selected.state == "pending_review" and selected.gate is not None:
+        review_columns = st.columns(2)
+        with review_columns[0]:
+            approve = st.button("Approve SOP", type="primary")
+        with review_columns[1]:
+            reject = st.button("Reject SOP")
+        decision = "approve" if approve else "reject" if reject else None
+        if decision is not None:
+            try:
+                core.review_sop_candidate(
+                    ReviewSopCandidateCommand(
+                        connection_path=connection_path,
+                        candidate_id=candidate.asset_id,
+                        expected_candidate_fingerprint=(
+                            candidate.candidate_fingerprint
+                        ),
+                        expected_gate_fingerprint=(
+                            selected.gate.gate_fingerprint
+                        ),
+                        decision=decision,
+                    )
+                )
+            except (ValueError, WorkspaceError) as error:
+                _render_action_error(error)
+            else:
+                st.rerun()
+
+
+def _render_sop_versions(
+    core: DomainCore,
+    connection_path: Path,
+    versions: tuple[SopVersionSnapshot, ...],
+) -> None:
+    if not versions:
+        st.info("No approved SOP Versions")
+        return
+    labels = {
+        item.asset_id: (
+            f"{item.sop_id} v{item.version} · "
+            f"{item.primary_metric_value:.6f} · {item.created_at}"
+        )
+        for item in versions
+    }
+    selected_id = st.selectbox(
+        "Approved SOP Version",
+        tuple(labels),
+        format_func=lambda value: labels[value],
+    )
+    selected = next(item for item in versions if item.asset_id == selected_id)
+    model = core.get_formal_model(connection_path, selected.formal_model_id)
+    st.markdown(f"**{selected.asset_id}**")
+    st.markdown(
+        f"Source `{selected.source_instance_id}` · Reproduction "
+        f"`{selected.reproduction_instance_id}`"
+    )
+    summary_columns = st.columns(4)
+    summary = (
+        ("Dataset", f"{selected.dataset_id} v{selected.dataset_version}"),
+        ("Metric", selected.primary_metric_name),
+        ("Value", f"{selected.primary_metric_value:.6f}"),
+        ("Approved by", selected.created_by),
+    )
+    for column, (label, value) in zip(summary_columns, summary):
+        with column:
+            st.metric(label, value)
+    st.markdown("**Training strategy**")
+    st.write(selected.strategy_summary)
+    st.markdown("**Optimization background**")
+    st.write(selected.optimization_background)
+    if selected.change_summary:
+        st.markdown("**Version change**")
+        st.write(selected.change_summary)
+    st.dataframe(
+        pd.DataFrame(
+            {
+                "Step": list(range(1, len(selected.steps) + 1)),
+                "Method": list(selected.steps),
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+    st.caption(
+        f"Formal Model {model.asset_id} · {model.model_fingerprint} · "
+        f"Approval {selected.approval_id}"
+    )
+    trend = pd.DataFrame(
+        [
+            {
+                "Version": item.version,
+                "Primary metric": item.primary_metric_value,
+            }
+            for item in versions
+            if item.sop_id == selected.sop_id
+        ]
+    ).set_index("Version")
+    st.line_chart(trend, height=260, width="stretch")
+
+
+def _render_action_error(error: ValueError | WorkspaceError) -> None:
+    if isinstance(error, WorkspaceError):
+        st.error(f"{error.code}: {error.message}")
+        st.caption(error.next_action)
+    else:
+        st.error(str(error))
 
 
 def _render_experience_review(

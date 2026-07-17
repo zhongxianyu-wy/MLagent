@@ -18,6 +18,7 @@ from src.domain.memory_repository import load_authorized_reviewers
 from src.domain.models import (
     CapacityStatus,
     FormalModelSnapshot,
+    SopCandidateStatus,
     SopCandidateSnapshot,
     SopEvidenceReference,
     SopReproductionGateSnapshot,
@@ -327,6 +328,32 @@ class SopRepository:
                 reverse=True,
             )
         )
+
+    def list_candidate_statuses(self) -> tuple[SopCandidateStatus, ...]:
+        statuses = []
+        for candidate in self.list_candidates():
+            gate = self.load_gate_for_candidate(candidate.asset_id)
+            review = self._find_candidate_review(candidate.asset_id)
+            if review is not None:
+                state = (
+                    "approved"
+                    if review["decision"] == "approve"
+                    else "rejected"
+                )
+            elif gate is None:
+                state = "pending_reproduction"
+            elif gate.outcome == "passed":
+                state = "pending_review"
+            else:
+                state = "reproduction_failed"
+            statuses.append(
+                SopCandidateStatus(
+                    candidate=candidate,
+                    gate=gate,
+                    state=state,
+                )
+            )
+        return tuple(statuses)
 
     def validate_candidate_source(
         self,

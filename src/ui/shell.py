@@ -8,6 +8,8 @@ from src.domain.models import (
     ExperienceSnapshot,
     ExplorationReviewSnapshot,
     RunStatusSnapshot,
+    SopCandidateStatus,
+    SopVersionSnapshot,
     SyncStatusSnapshot,
     WorkspaceSnapshot,
 )
@@ -59,6 +61,8 @@ class ShellState:
     exploration_review: ExplorationReviewSnapshot | None
     run_statuses: tuple[RunStatusSnapshot, ...]
     experiences: tuple[ExperienceSnapshot, ...]
+    sop_candidates: tuple[SopCandidateStatus, ...]
+    sop_versions: tuple[SopVersionSnapshot, ...]
 
 
 def build_shell_state(
@@ -68,6 +72,8 @@ def build_shell_state(
     exploration_review: ExplorationReviewSnapshot | None = None,
     run_statuses: tuple[RunStatusSnapshot, ...] = (),
     experiences: tuple[ExperienceSnapshot, ...] = (),
+    sop_candidates: tuple[SopCandidateStatus, ...] = (),
+    sop_versions: tuple[SopVersionSnapshot, ...] = (),
 ) -> ShellState:
     git_status = sync_display(snapshot.sync.state)
     module_status = {module: "Not started" for module in NAVIGATION}
@@ -101,6 +107,15 @@ def build_shell_state(
         module_status["Experience Review"] = "Approved"
     elif experience_states:
         module_status["Experience Review"] = "Rejected"
+    sop_states = {item.state for item in sop_candidates}
+    if sop_states & {"pending_reproduction", "pending_review"}:
+        module_status["SOP Overview"] = "Pending review"
+    elif "reproduction_failed" in sop_states:
+        module_status["SOP Overview"] = "Failed"
+    elif sop_versions or "approved" in sop_states:
+        module_status["SOP Overview"] = "Approved"
+    elif "rejected" in sop_states:
+        module_status["SOP Overview"] = "Rejected"
     return ShellState(
         navigation=NAVIGATION,
         context={
@@ -132,6 +147,8 @@ def build_shell_state(
         exploration_review=exploration_review,
         run_statuses=run_statuses,
         experiences=experiences,
+        sop_candidates=sop_candidates,
+        sop_versions=sop_versions,
     )
 
 

@@ -44,6 +44,7 @@ from src.domain.models import (
     SessionStopSyncCommand,
     SessionExperienceOutcome,
     SopCandidateSnapshot,
+    SopCandidateStatus,
     SopReproductionGateSnapshot,
     SopReviewOutcome,
     SopVersionSnapshot,
@@ -710,6 +711,15 @@ class DomainCore:
         return self._sop_repository(
             repository.repository_path
         ).list_candidates()
+
+    def list_sop_candidate_statuses(
+        self,
+        connection_path: Path,
+    ) -> tuple[SopCandidateStatus, ...]:
+        _, repository = self._open_connected_repository(connection_path)
+        return self._sop_repository(
+            repository.repository_path
+        ).list_candidate_statuses()
 
     def list_sop_versions(
         self,
