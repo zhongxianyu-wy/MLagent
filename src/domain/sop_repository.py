@@ -18,6 +18,7 @@ from src.domain.memory_repository import validate_reviewer_policy_for_approval
 from src.domain.models import (
     CapacityStatus,
     FormalModelSnapshot,
+    NotebookOriginInfo,
     SopCandidateStatus,
     SopCandidateSnapshot,
     SopEvidenceReference,
@@ -232,6 +233,9 @@ class SopRepository:
                 "evidence": [item.to_dict() for item in source["evidence"]],
                 "created_at": created_at,
                 "created_by": actor_id,
+                "notebook_origin": self._lookup_notebook_origin(
+                    spec.source_instance_id
+                ),
             }
             payload["candidate_fingerprint"] = _fingerprint(payload)
             raw = _json_bytes(payload)
@@ -310,6 +314,9 @@ class SopRepository:
                 ),
                 created_at=payload["created_at"],
                 created_by=payload["created_by"],
+                notebook_origin=self._parse_notebook_origin(
+                    payload.get("notebook_origin")
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise WorkspaceError(
@@ -1976,6 +1983,41 @@ class SopRepository:
         value = self.candidate_id_factory()
         self._validate_id(value, "candidate_id")
         return value
+
+    def _lookup_notebook_origin(
+        self,
+        instance_id: str,
+    ) -> dict[str, str] | None:
+        """Check if this instance originated from a notebook import."""
+        imports_dir = self.repository_path / "notebooks" / "imports"
+        if not imports_dir.exists():
+            return None
+        for path in sorted(imports_dir.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if record.get("training_instance_id") == instance_id:
+                return {
+                    "notebook_import_id": record["asset_id"],
+                    "original_filename": record.get(
+                        "original_filename", ""
+                    ),
+                    "content_fingerprint": record["content_fingerprint"],
+                }
+        return None
+
+    @staticmethod
+    def _parse_notebook_origin(
+        data: dict[str, str] | None,
+    ) -> NotebookOriginInfo | None:
+        if not data or not isinstance(data, dict):
+            return None
+        return NotebookOriginInfo(
+            notebook_import_id=data.get("notebook_import_id", ""),
+            original_filename=data.get("original_filename", ""),
+            content_fingerprint=data.get("content_fingerprint", ""),
+        )
 
     def _new_gate_id(self) -> str:
         value = self.gate_id_factory()

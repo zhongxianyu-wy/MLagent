@@ -416,6 +416,17 @@ class ReviewSopCandidateCommand:
 
 
 @dataclass(frozen=True)
+class NotebookOriginInfo:
+    """Provenance link showing a SOP candidate originated from a notebook import."""
+    notebook_import_id: str
+    original_filename: str
+    content_fingerprint: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
 class SopCandidateSnapshot:
     asset_id: str
     asset_path: str
@@ -443,6 +454,7 @@ class SopCandidateSnapshot:
     evidence: tuple[SopEvidenceReference, ...]
     created_at: str
     created_by: str
+    notebook_origin: NotebookOriginInfo | None = None
     asset_type: str = "sop_candidate"
 
     def __post_init__(self) -> None:
