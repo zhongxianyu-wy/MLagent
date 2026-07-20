@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Callable
@@ -36,8 +37,10 @@ from src.domain.models import (
     ExplorationApprovalSnapshot,
     ExplorationPlanSnapshot,
     ExplorationReviewSnapshot,
+    ImportNotebookCommand,
     IndexSummary,
     InspectDatasetCommand,
+    NotebookImportSnapshot,
     RecordExplorationPlanCommand,
     RecoverRunCommand,
     ReproduceSopCandidateCommand,
@@ -59,6 +62,8 @@ from src.domain.models import (
     WorkspaceError,
     WorkspaceSnapshot,
 )
+from src.domain.notebook_parser import parse_notebook
+from src.domain.notebook_repository import NotebookRepository
 from src.domain.run_execution import TrainingRunCoordinator
 from src.domain.run_repository import RunRepository
 from src.domain.sop_promotion import SopPromotionCoordinator
@@ -709,6 +714,54 @@ class DomainCore:
         )
         LocalIndex(repository.repository_path).rebuild()
         return outcome
+
+    def import_notebook(
+        self,
+        command: ImportNotebookCommand,
+    ) -> NotebookImportSnapshot:
+        """Import a .ipynb, preserve it, parse it, and store the import record.
+
+        If parse warnings are blocking (missing deps, interactive steps, unclear
+        randomness) the state is ``parse_blocked`` and no execution is attempted.
+        Otherwise the state is ``preserved`` — the caller (or a follow-up step)
+        can then execute the notebook code in a controlled environment.
+        """
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        notebook_bytes = command.notebook_path.read_bytes()
+        fingerprint = hashlib.sha256(notebook_bytes).hexdigest()
+        parse_report = parse_notebook(command.notebook_path)
+        nb_repo = NotebookRepository(repository.repository_path)
+        snapshot = nb_repo.store_import(
+            original_bytes=notebook_bytes,
+            fingerprint=fingerprint,
+            importer=connection.actor_id,
+            source_description=command.source_description,
+            parse_report=parse_report,
+            original_filename=str(command.notebook_path.name),
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+        LocalIndex(repository.repository_path).rebuild()
+        return snapshot
+
+    def get_notebook_import(
+        self,
+        connection_path: Path,
+        asset_id: str,
+    ) -> dict[str, Any]:
+        """Read a stored notebook import record."""
+        connection, repository = self._open_connected_repository(connection_path)
+        return NotebookRepository(repository.repository_path).get_import(asset_id)
+
+    def list_notebook_imports(
+        self,
+        connection_path: Path,
+    ) -> list[dict[str, Any]]:
+        """List all notebook import records."""
+        connection, repository = self._open_connected_repository(connection_path)
+        return NotebookRepository(repository.repository_path).list_imports()
 
     def list_sop_candidates(
         self,
