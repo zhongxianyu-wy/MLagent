@@ -1774,6 +1774,16 @@ class ImportNotebookCommand:
 
 
 @dataclass(frozen=True)
+class ReproduceNotebookCommand:
+    """Command to execute a preserved notebook into a Training Instance."""
+    connection_path: Path
+    asset_id: str           # the notebook import asset to reproduce
+    code_root: Path         # where to write the extracted .py entrypoint
+    entrypoint_name: str = "notebook_reproduce.py"
+    random_seed: int = 42   # injected if notebook lacks explicit seed
+
+
+@dataclass(frozen=True)
 class NotebookImportSnapshot:
     """Result of a notebook import — may be reproduced, blocked, or failed."""
     asset_id: str

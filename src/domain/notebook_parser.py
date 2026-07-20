@@ -182,3 +182,24 @@ def _detect_warnings(
         ))
 
     return warnings
+
+
+def extract_notebook_code(path: Path) -> str:
+    """Extract code cells from a .ipynb and return them as a single Python script."""
+    raw = path.read_bytes()
+    nb = json.loads(raw)
+    parts: list[str] = []
+    for cell in nb.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        source = cell.get("source", "")
+        if isinstance(source, list):
+            source = "".join(source)
+        stripped = source.strip()
+        if not stripped:
+            continue
+        # skip magic/shell lines
+        lines = [ln for ln in stripped.splitlines() if not _MAGIC_RE.match(ln)]
+        if lines:
+            parts.append("\n".join(lines))
+    return "\n\n".join(parts)

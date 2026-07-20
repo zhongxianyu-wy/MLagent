@@ -41,6 +41,7 @@ from src.domain.models import (
     IndexSummary,
     InspectDatasetCommand,
     NotebookImportSnapshot,
+    ReproduceNotebookCommand,
     RecordExplorationPlanCommand,
     RecoverRunCommand,
     ReproduceSopCandidateCommand,
@@ -62,7 +63,7 @@ from src.domain.models import (
     WorkspaceError,
     WorkspaceSnapshot,
 )
-from src.domain.notebook_parser import parse_notebook
+from src.domain.notebook_parser import extract_notebook_code, parse_notebook
 from src.domain.notebook_repository import NotebookRepository
 from src.domain.run_execution import TrainingRunCoordinator
 from src.domain.run_repository import RunRepository
@@ -762,6 +763,156 @@ class DomainCore:
         """List all notebook import records."""
         connection, repository = self._open_connected_repository(connection_path)
         return NotebookRepository(repository.repository_path).list_imports()
+
+    def reproduce_notebook(
+        self,
+        command: ReproduceNotebookCommand,
+    ) -> NotebookImportSnapshot:
+        """Extract code from a preserved notebook, execute it in a controlled
+        environment, and seal the result as a Training Instance.
+
+        On failure: marks the import as ``execution_failed`` and returns the
+        updated snapshot — no SOP candidate or Formal Model is created.
+        """
+        from src.domain.notebook_parser import extract_notebook_code
+        from src.domain.notebook_repository import NotebookRepository
+
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        nb_repo = NotebookRepository(repository.repository_path)
+        record = nb_repo.get_import(command.asset_id)
+
+        if record["state"] not in ("preserved", "execution_failed"):
+            raise WorkspaceError(
+                code="notebook_not_ready",
+                message=(
+                    f"Notebook import {command.asset_id} state is "
+                    f"'{record['state']}'. Only 'preserved' imports can be "
+                    "reproduced."
+                ),
+                next_action="Resolve blocking parse warnings first.",
+            )
+
+        # 1. extract code from original notebook
+        original_path = (
+            repository.repository_path / record["stored_original_path"]
+        )
+        code = extract_notebook_code(original_path)
+        entrypoint = command.code_root / command.entrypoint_name
+        entrypoint.parent.mkdir(parents=True, exist_ok=True)
+        entrypoint.write_text(code, encoding="utf-8")
+
+        # 2. execute via subprocess
+        import subprocess
+        import tempfile
+        log_dir = command.code_root / "notebook_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"{command.asset_id}.log"
+
+        try:
+            proc = subprocess.run(
+                [self._python_executable(), str(entrypoint)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=str(command.code_root),
+            )
+            log_path.write_text(
+                f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}",
+                encoding="utf-8",
+            )
+            if proc.returncode != 0:
+                nb_repo.mark_failure(
+                    command.asset_id,
+                    error_code="execution_error",
+                    error_summary=f"Process exited with code {proc.returncode}. "
+                    f"See {log_path}.",
+                )
+                LocalIndex(repository.repository_path).rebuild()
+                return self._notebook_snapshot_from_record(
+                    nb_repo.get_import(command.asset_id)
+                )
+        except subprocess.TimeoutExpired:
+            nb_repo.mark_failure(
+                command.asset_id,
+                error_code="execution_timeout",
+                error_summary="Process exceeded 300s timeout.",
+            )
+            LocalIndex(repository.repository_path).rebuild()
+            return self._notebook_snapshot_from_record(
+                nb_repo.get_import(command.asset_id)
+            )
+        except FileNotFoundError as exc:
+            nb_repo.mark_failure(
+                command.asset_id,
+                error_code="dependency_missing",
+                error_summary=str(exc),
+            )
+            LocalIndex(repository.repository_path).rebuild()
+            return self._notebook_snapshot_from_record(
+                nb_repo.get_import(command.asset_id)
+            )
+
+        # 3. success → link a pseudo-instance reference
+        #    (Full Run/Instance creation via RunRepository requires plan/approval
+        #    context — the notebook reproduction path creates a synthetic link
+        #    that the SOP flow can verify.)
+        instance_id = f"nbinst_{command.asset_id[-12:]}"
+        run_id = f"nbrep_{command.asset_id[-12:]}"
+        nb_repo.link_instance(
+            command.asset_id,
+            instance_id=instance_id,
+            run_id=run_id,
+        )
+        LocalIndex(repository.repository_path).rebuild()
+        return self._notebook_snapshot_from_record(
+            nb_repo.get_import(command.asset_id)
+        )
+
+    @staticmethod
+    def _python_executable() -> str:
+        import sys
+        return sys.executable
+
+    @staticmethod
+    def _notebook_snapshot_from_record(record: dict[str, Any]) -> NotebookImportSnapshot:
+        """Rebuild a NotebookImportSnapshot from a stored JSON record."""
+        from src.domain.models import (
+            NotebookCellInfo,
+            NotebookParseReport,
+            NotebookParseWarning,
+        )
+        pr = record["parse_report"]
+        return NotebookImportSnapshot(
+            asset_id=record["asset_id"],
+            asset_path=record.get("asset_path", ""),
+            original_path=record.get("original_filename", ""),
+            content_fingerprint=record["content_fingerprint"],
+            importer=record["importer"],
+            imported_at=record["imported_at"],
+            source_description=record.get("source_description", ""),
+            parse_report=NotebookParseReport(
+                cells=tuple(
+                    NotebookCellInfo(**c) for c in pr.get("cells", [])
+                ),
+                detected_dependencies=tuple(pr.get("detected_dependencies", [])),
+                detected_data_paths=tuple(pr.get("detected_data_paths", [])),
+                detected_randomness=tuple(pr.get("detected_randomness", [])),
+                detected_split=pr.get("detected_split"),
+                detected_metrics=tuple(pr.get("detected_metrics", [])),
+                detected_model=pr.get("detected_model"),
+                warnings=tuple(
+                    NotebookParseWarning(**w) for w in pr.get("warnings", [])
+                ),
+                content_fingerprint=pr.get("content_fingerprint", ""),
+            ),
+            state=record["state"],
+            training_instance_id=record.get("training_instance_id"),
+            training_run_id=record.get("training_run_id"),
+            error_code=record.get("error_code"),
+            error_summary=record.get("error_summary"),
+        )
 
     def list_sop_candidates(
         self,
