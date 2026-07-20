@@ -1726,3 +1726,81 @@ def _to_jsonable(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {key: _to_jsonable(item) for key, item in value.items()}
     return value
+
+
+# ── Issue #9: Notebook import models ──────────────────────────────────
+
+
+@dataclass(frozen=True)
+class NotebookCellInfo:
+    """One cell from the parsed notebook."""
+    index: int
+    cell_type: str  # code | markdown
+    source_lines: int
+    has_outputs: bool
+
+
+@dataclass(frozen=True)
+class NotebookParseWarning:
+    """A potential issue found during notebook parsing."""
+    kind: str  # missing_dependency | hidden_path | non_portable_path | implicit_state | unclear_randomness | interactive_step
+    detail: str
+    blocking: bool
+
+
+@dataclass(frozen=True)
+class NotebookParseReport:
+    """Structured analysis of a notebook's training logic."""
+    cells: tuple[NotebookCellInfo, ...]
+    detected_dependencies: tuple[str, ...]
+    detected_data_paths: tuple[str, ...]
+    detected_randomness: tuple[str, ...]
+    detected_split: str | None
+    detected_metrics: tuple[str, ...]
+    detected_model: str | None
+    warnings: tuple[NotebookParseWarning, ...]
+    content_fingerprint: str
+
+
+@dataclass(frozen=True)
+class ImportNotebookCommand:
+    """Command to import, parse and reproduce a notebook."""
+    connection_path: Path
+    notebook_path: Path
+    source_description: str
+    dataset_id: str
+    dataset_version: str
+    code_root: Path
+
+
+@dataclass(frozen=True)
+class NotebookImportSnapshot:
+    """Result of a notebook import — may be reproduced, blocked, or failed."""
+    asset_id: str
+    asset_path: str
+    original_path: str
+    content_fingerprint: str
+    importer: str
+    imported_at: str
+    source_description: str
+    parse_report: NotebookParseReport
+    state: str  # preserved | parse_blocked | execution_failed | reproduced
+    training_instance_id: str | None = None
+    training_run_id: str | None = None
+    error_code: str | None = None
+    error_summary: str | None = None
+
+
+_NOTEBOOK_IMPORT_STATES = frozenset(
+    {"preserved", "parse_blocked", "execution_failed", "reproduced"}
+)
+_NOTEBOOK_PARSE_WARNING_KINDS = frozenset(
+    {
+        "missing_dependency",
+        "hidden_path",
+        "non_portable_path",
+        "implicit_state",
+        "unclear_randomness",
+        "interactive_step",
+    }
+)
