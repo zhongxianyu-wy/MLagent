@@ -592,6 +592,13 @@ def _render_sop_candidate_workspace(
         f"{candidate.source_run_id} · {candidate.source_instance_id} · "
         f"seed {candidate.random_seed}"
     )
+    if candidate.notebook_origin is not None:
+        nb = candidate.notebook_origin
+        st.info(
+            f"📓 **Notebook 来源** — {nb.original_filename} "
+            f"(import: {nb.notebook_import_id}, "
+            f"fingerprint: {nb.content_fingerprint[:12]}…)"
+        )
     st.markdown("**Strategy summary**")
     st.write(candidate.strategy_summary)
     st.markdown("**Optimization background**")
