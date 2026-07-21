@@ -42,6 +42,8 @@ from src.domain.models import (
     InspectDatasetCommand,
     NotebookImportSnapshot,
     ReproduceNotebookCommand,
+    RetrainFromSopCommand,
+    RetrainFromSopResult,
     RecordExplorationPlanCommand,
     RecoverRunCommand,
     ReproduceSopCandidateCommand,
@@ -66,7 +68,7 @@ from src.domain.models import (
 from src.domain.notebook_parser import extract_notebook_code, parse_notebook
 from src.domain.notebook_repository import NotebookRepository
 from src.domain.run_execution import TrainingRunCoordinator
-from src.domain.run_repository import RunRepository
+from src.domain.run_repository import InstancePreparationSpec, RunRepository, RunStartSpec
 from src.domain.sop_promotion import SopPromotionCoordinator
 from src.domain.sop_repository import (
     SopCandidateSpec,
@@ -763,6 +765,201 @@ class DomainCore:
         """List all notebook import records."""
         connection, repository = self._open_connected_repository(connection_path)
         return NotebookRepository(repository.repository_path).list_imports()
+
+    def check_retrain_compatibility(
+        self,
+        connection_path: Path,
+        sop_id: str,
+        sop_version: int,
+        dataset_id: str,
+        dataset_version: int,
+    ):
+        """Check whether a dataset is compatible for retraining a SOP."""
+        from src.domain.sop_retrain import check_retrain_compatibility
+        connection, repository = self._open_connected_repository(connection_path)
+        sop_repo = self._sop_repository(repository.repository_path)
+        versions = sop_repo.list_sop_versions()
+        sop = next(
+            (v for v in versions if v.sop_id == sop_id and v.version == sop_version),
+            None,
+        )
+        if sop is None:
+            raise WorkspaceError(
+                code="sop_version_not_found",
+                message=f"Approved SOP version not found: {sop_id} v{sop_version}.",
+                next_action="Check available SOP versions with list_sop_versions.",
+            )
+        dataset = DatasetRepository(repository.repository_path).load(
+            dataset_id, dataset_version,
+        )
+        return check_retrain_compatibility(sop, dataset)
+
+    def retrain_from_sop(
+        self,
+        command: RetrainFromSopCommand,
+    ) -> RetrainFromSopResult:
+        """Retrain an approved SOP on new data. Never mutates SOP or Formal Model."""
+        from src.domain.sop_retrain import check_retrain_compatibility as _check
+
+        connection, repository = self._open_connected_repository(
+            command.connection_path
+        )
+        sop_repo = self._sop_repository(repository.repository_path)
+        versions = sop_repo.list_sop_versions()
+        sop = next(
+            (v for v in versions
+             if v.sop_id == command.sop_id and v.version == command.sop_version),
+            None,
+        )
+        if sop is None:
+            raise WorkspaceError(
+                code="sop_version_not_found",
+                message=f"Approved SOP version not found: "
+                f"{command.sop_id} v{command.sop_version}.",
+                next_action="Check available SOP versions.",
+            )
+
+        dataset = DatasetRepository(repository.repository_path).load(
+            command.dataset_id, command.dataset_version,
+        )
+
+        compat = _check(sop, dataset)
+        if not compat.compatible:
+            failed = [c[0] for c in compat.checks if not c[2]]
+            raise WorkspaceError(
+                code="sop_retrain_incompatible",
+                message=f"Dataset incompatible with SOP {command.sop_id} "
+                f"v{command.sop_version}. Failed checks: {failed}.",
+                next_action="Fix dataset or use a different SOP.",
+            )
+
+        # Load the SOP's source run/instance to get the code + config
+        run_repo = self._sop_run_repository(repository.repository_path)
+        source_instance = run_repo.load_instance(
+            sop.source_run_id, sop.source_instance_id,
+        )
+        source_code = run_repo.load_code_revision_for_instance(
+            sop.source_run_id, sop.source_instance_id,
+        )
+        source_start = run_repo.load_run_start(sop.source_run_id)
+
+        # Create a new retrain run
+        retrain_run_id = self.run_id_factory()
+        run_repo.start_run(
+            RunStartSpec(
+                run_id=retrain_run_id,
+                dataset_id=dataset.dataset_id,
+                dataset_version=dataset.version,
+                dataset_content_fingerprint=dataset.content_fingerprint,
+                dataset_version_fingerprint=dataset.version_fingerprint,
+                plan_id=source_start["plan_id"],
+                plan_event_id=source_start["plan_event_id"],
+                planning_session_id=source_start["planning_session_id"],
+                plan_fingerprint=source_start["plan_fingerprint"],
+                approval_id=source_start["approval_id"],
+                approval_fingerprint=source_start["approval_fingerprint"],
+                code_fingerprint=source_code.code_fingerprint,
+                user_direction=f"SOP retrain: {command.sop_id} v{command.sop_version}",
+                stop_conditions=tuple(source_start.get("stop_conditions", [])),
+                primary_metric_name=sop.primary_metric_name,
+                target_metric_value=float(source_start.get(
+                    "target_metric_value", sop.primary_metric_value
+                )),
+                expected_round_count=1,
+                human_marked_rounds=(),
+            ),
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+        # Freeze code — derive code_root from the SOP's frozen source code
+        code_root = (
+            repository.repository_path
+            / Path(source_code.asset_path).parent / "files"
+        )
+        run_repo.freeze_code_revision(
+            run_id=retrain_run_id,
+            code_root=code_root,
+            candidate_code_files=source_code.files,
+            code_fingerprint=source_code.code_fingerprint,
+            entrypoint_path=source_code.entrypoint_path,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+        # Execute training — delegate to TrainingRunCoordinator like exploration
+        executor = (
+            self.training_executor_factory()
+            if self.training_executor_factory is not None
+            else SubprocessTrainingExecutor()
+        )
+        import tempfile
+        split_path = Path(tempfile.mktemp(suffix=".csv"))
+        split_path.write_text("sample_id,split\n", encoding="utf-8")
+
+        prepared = run_repo.prepare_instance(
+            spec=InstancePreparationSpec(
+                run_id=retrain_run_id,
+                round_number=1,
+                hypothesis=f"SOP {command.sop_id} v{command.sop_version} on new data",
+                optimization_direction="sop_retrain",
+                intended_changes=(),
+                random_seed=source_instance.random_seed,
+                parent_instance_id=None,
+                parent_instance_fingerprint=None,
+                configuration=dict(source_instance.metrics),
+                environment=source_instance.environment_fingerprint
+                and {"fingerprint": source_instance.environment_fingerprint}
+                or {},
+            ),
+            code_revision=run_repo.load_code_revision(
+                retrain_run_id, source_code.code_fingerprint,
+            ),
+            split_path=split_path,
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+        from src.domain.sop_promotion import _timeout_seconds
+        result = executor.execute(
+            prepared,
+            stop_requested=lambda: False,
+            timeout_seconds=_timeout_seconds(prepared),
+        )
+
+        instance = run_repo.seal_instance(
+            prepared,
+            result,
+            retention_reasons=("sop_retrain",),
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+        # Calculate delta
+        new_value = result.primary_metric_value
+        delta = (new_value - sop.primary_metric_value) if new_value is not None else None
+
+        run_repo.finish_run(
+            run_id=retrain_run_id,
+            state=result.state,
+            reason=result.error_summary or "SOP retrain completed",
+            actor_id=connection.actor_id,
+            capacity=repository.capacity,
+        )
+
+        LocalIndex(repository.repository_path).rebuild()
+
+        return RetrainFromSopResult(
+            run_id=retrain_run_id,
+            instance_id=instance.asset_id,
+            primary_metric_name=sop.primary_metric_name,
+            primary_metric_value=new_value,
+            sop_primary_metric_value=sop.primary_metric_value,
+            delta=delta,
+            candidate_model_id=instance.model_fingerprint,
+            sop_version_unchanged=True,
+            formal_model_unchanged=True,
+        )
 
     def reproduce_notebook(
         self,

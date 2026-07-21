@@ -1826,3 +1826,42 @@ _NOTEBOOK_PARSE_WARNING_KINDS = frozenset(
         "interactive_step",
     }
 )
+
+
+# ── Issue #10: SOP retraining models ──────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RetrainFromSopCommand:
+    """Command to retrain an approved SOP on new data."""
+    connection_path: Path
+    sop_id: str
+    sop_version: int
+    dataset_id: str
+    dataset_version: int
+    code_root: Path
+    entrypoint_path: str | None = None
+    human_marked_rounds: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class SopRetrainCompatibilityReport:
+    """Result of checking whether a new dataset is compatible with a SOP."""
+    compatible: bool
+    checks: tuple[tuple[str, str, bool], ...]
+
+
+@dataclass(frozen=True)
+class RetrainFromSopResult:
+    """Result of a SOP retraining run — never mutates SOP or Formal Model."""
+    run_id: str
+    instance_id: str
+    primary_metric_name: str
+    primary_metric_value: float | None
+    sop_primary_metric_value: float
+    delta: float | None
+    candidate_model_id: str | None
+    sop_version_unchanged: bool
+    formal_model_unchanged: bool
+    error_code: str | None = None
+    error_summary: str | None = None
