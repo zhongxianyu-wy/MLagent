@@ -847,6 +847,47 @@ def _render_sop_versions(
         width="stretch",
     )
 
+    # Retrain history — find runs tagged as SOP retrain for this SOP
+    retrain_runs = [
+        status for status in core.list_run_statuses(connection_path)
+        if status.user_direction
+        and status.user_direction.startswith(
+            f"SOP retrain: {selected.sop_id} v{selected.version}"
+        )
+    ]
+    if retrain_runs:
+        st.markdown("**重训历史**")
+        retrain_data = []
+        for rt in retrain_runs:
+            best = rt.best_primary_metric_value
+            delta = (
+                best - selected.primary_metric_value
+                if best is not None
+                else None
+            )
+            retrain_data.append({
+                "Run": rt.run_id,
+                "Dataset": f"{rt.dataset_id} v{rt.dataset_version}",
+                "Best metric": (
+                    f"{best:.6f}" if best is not None else "—"
+                ),
+                "Delta": (
+                    f"{'↑' if delta > 0 else '↓'} {abs(delta):.6f}"
+                    if delta is not None
+                    else "—"
+                ),
+                "State": _state_label(rt.state),
+            })
+        st.dataframe(
+            pd.DataFrame(retrain_data),
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "🔄 重训结果始终作为新 Run 和候选模型保存，"
+            "不会自动覆盖 SOP 版本或正式模型。"
+        )
+
 
 def _render_action_error(error: ValueError | WorkspaceError) -> None:
     if isinstance(error, WorkspaceError):
@@ -1224,6 +1265,11 @@ def _render_live_run(
         f"{status.primary_metric_name} · updated {status.updated_at} · "
         f"{status.user_direction}"
     )
+
+    # SOP retrain badge
+    if status.user_direction and status.user_direction.startswith("SOP retrain:"):
+        sop_label = status.user_direction.replace("SOP retrain: ", "")
+        st.info(f"🔄 **SOP 重训** — {sop_label} · SOP 版本和正式模型不会被修改")
 
     if status.performance_points:
         trend = pd.DataFrame(
