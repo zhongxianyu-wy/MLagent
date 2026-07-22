@@ -36,6 +36,7 @@ GLOBAL_STATUS_VOCABULARY = (
     "Syncing",
     "Pending Sync",
     "Conflict",
+    "Workspace changed",
 )
 CONTEXT_LABELS = {
     "workspace": "Workspace",
@@ -74,6 +75,7 @@ def build_shell_state(
     experiences: tuple[ExperienceSnapshot, ...] = (),
     sop_candidates: tuple[SopCandidateStatus, ...] = (),
     sop_versions: tuple[SopVersionSnapshot, ...] = (),
+    code_review_status: str | None = None,
 ) -> ShellState:
     git_status = sync_display(snapshot.sync.state)
     module_status = {module: "Not started" for module in NAVIGATION}
@@ -116,6 +118,8 @@ def build_shell_state(
         module_status["SOP Overview"] = "Approved"
     elif "rejected" in sop_states:
         module_status["SOP Overview"] = "Rejected"
+    if code_review_status is not None:
+        module_status["Code Review"] = code_review_status
     return ShellState(
         navigation=NAVIGATION,
         context={

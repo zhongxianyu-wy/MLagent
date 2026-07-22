@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import uuid
@@ -9,9 +10,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.domain.code_revision_repository import (
+    CodeRevisionRepository,
+    compute_code_fingerprint,
+)
 from src.domain.dataset_intake import DatasetInspector
 from src.domain.dataset_repository import DatasetRepository
-from src.domain.exploration_repository import ExplorationRepository
+from src.domain.exploration_repository import (
+    MAX_CODE_FILE_BYTES,
+    MAX_CODE_FILES,
+    ExplorationRepository,
+)
 from src.domain.experience_repository import ExperienceRepository
 from src.domain.git_sync import GitSyncService
 from src.domain.local_index import LocalIndex
@@ -64,6 +73,14 @@ from src.domain.models import (
     WorkspaceConnection,
     WorkspaceError,
     WorkspaceSnapshot,
+    CandidateCodeFile,
+    CodeFileDelta,
+    CodeRevisionDiff,
+    CodeRevisionSnapshot,
+    CodeReviewSnapshot,
+    EditedFile,
+    ManagedFileEntry,
+    SaveCodeRevisionCommand,
 )
 from src.domain.notebook_parser import extract_notebook_code, parse_notebook
 from src.domain.notebook_repository import NotebookRepository
@@ -1495,6 +1512,478 @@ class DomainCore:
                 ),
             ) from error
         return resolved_code_root
+
+    # ------------------------------------------------------------------
+    # Code Review / Code Revision (Issue #11)
+    # ------------------------------------------------------------------
+
+    def _code_revision_repository(
+        self, repository_path: Path
+    ) -> CodeRevisionRepository:
+        return CodeRevisionRepository(repository_path, clock=self.clock)
+
+    @staticmethod
+    def _binding_path(
+        repository_path: Path,
+        resolved_code_root: Path,
+        workspace_root: Path,
+    ) -> Path:
+        relative = resolved_code_root.relative_to(workspace_root).as_posix()
+        key = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:16]
+        return repository_path / "code-revisions" / ".bindings" / f"{key}.json"
+
+    def resolve_code_id(
+        self, connection_path: Path, code_root: Path
+    ) -> str | None:
+        resolved_root = self._require_managed_code_root(connection_path, code_root)
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        workspace_root = connection_path.expanduser().resolve().parent
+        binding = self._binding_path(
+            repository.repository_path, resolved_root, workspace_root
+        )
+        if not binding.exists():
+            return None
+        try:
+            payload = json.loads(binding.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise WorkspaceError(
+                code="invalid_code_revision",
+                message=f"Code id binding cannot be read: {binding}",
+                next_action="Re-register the code id from the Code Review module.",
+            ) from error
+        code_id = payload.get("code_id") if isinstance(payload, dict) else None
+        return code_id if isinstance(code_id, str) and code_id else None
+
+    def register_code_id(
+        self, connection_path: Path, code_root: Path, code_id: str
+    ) -> None:
+        resolved_root = self._require_managed_code_root(connection_path, code_root)
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        workspace_root = connection_path.expanduser().resolve().parent
+        binding_parent = (
+            repository.repository_path / "code-revisions" / ".bindings"
+        )
+        binding_parent.mkdir(parents=True, exist_ok=True)
+        binding = self._binding_path(
+            repository.repository_path, resolved_root, workspace_root
+        )
+        payload = json.dumps({"code_id": code_id}, ensure_ascii=False) + "\n"
+        temporary = binding_parent / f".binding-{uuid.uuid4().hex}.tmp"
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+            temporary.replace(binding)
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            raise WorkspaceError(
+                code="code_revision_write_failed",
+                message="The code id binding could not be written.",
+                next_action="Check Team Memory permissions and retry.",
+            ) from error
+
+    @staticmethod
+    def _discover_managed_files(
+        resolved_root: Path
+    ) -> tuple[CandidateCodeFile, ...]:
+        if resolved_root.is_symlink() or not resolved_root.is_dir():
+            raise WorkspaceError(
+                code="unmanaged_code_root",
+                message="Candidate code root is not a real directory.",
+                next_action="Place candidate code beside the workspace connection.",
+            )
+        discovered: list[CandidateCodeFile] = []
+        for candidate in sorted(resolved_root.rglob("*.py")):
+            relative = candidate.relative_to(resolved_root)
+            if any(
+                part.startswith(".") or part == "__pycache__"
+                for part in relative.parts
+            ):
+                continue
+            if candidate.is_symlink():
+                raise WorkspaceError(
+                    code="unsafe_candidate_code_path",
+                    message=f"Managed code path is a symbolic link: {relative.as_posix()}",
+                    next_action="Replace symbolic links with real files inside the managed code root.",
+                )
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(resolved_root)
+            except (OSError, ValueError) as error:
+                raise WorkspaceError(
+                    code="unsafe_candidate_code_path",
+                    message=f"Managed code path escapes the code root: {relative.as_posix()}",
+                    next_action="Keep managed code inside the registered code root.",
+                ) from error
+            try:
+                raw = candidate.read_bytes()
+            except OSError as error:
+                raise WorkspaceError(
+                    code="candidate_code_not_found",
+                    message=f"Candidate code cannot be read: {relative.as_posix()}",
+                    next_action="Restore the managed code inside the code root.",
+                ) from error
+            if len(raw) >= MAX_CODE_FILE_BYTES:
+                raise WorkspaceError(
+                    code="candidate_code_too_large",
+                    message=f"Candidate code exceeds the review limit: {relative.as_posix()}",
+                    next_action="Split the candidate training code into smaller reviewable files.",
+                )
+            try:
+                raw.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise WorkspaceError(
+                    code="candidate_code_not_text",
+                    message=f"Candidate code is not UTF-8 text: {relative.as_posix()}",
+                    next_action="Generate reviewable UTF-8 source code.",
+                ) from error
+            discovered.append(
+                CandidateCodeFile(
+                    path=relative.as_posix(),
+                    sha256=hashlib.sha256(raw).hexdigest(),
+                    size_bytes=len(raw),
+                )
+            )
+        if len(discovered) > MAX_CODE_FILES:
+            raise WorkspaceError(
+                code="too_many_code_files",
+                message="Managed code root exceeds the reviewed file count limit.",
+                next_action="Reduce the number of managed Python files under the code root.",
+            )
+        return tuple(discovered)
+
+    def list_managed_files(
+        self, connection_path: Path, code_root: Path
+    ) -> tuple[ManagedFileEntry, ...]:
+        resolved_root = self._require_managed_code_root(connection_path, code_root)
+        files = self._discover_managed_files(resolved_root)
+        entrypoint = files[0].path if files else ""
+        return tuple(
+            ManagedFileEntry(
+                path=f.path,
+                size_bytes=f.size_bytes,
+                sha256=f.sha256,
+                is_entrypoint=(f.path == entrypoint),
+            )
+            for f in files
+        )
+
+    def read_managed_file(
+        self, connection_path: Path, code_root: Path, rel_path: str
+    ) -> bytes:
+        resolved_root = self._require_managed_code_root(connection_path, code_root)
+        relative = Path(rel_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise WorkspaceError(
+                code="unsafe_candidate_code_path",
+                message=f"Managed code path is not relative: {rel_path}",
+                next_action="Choose a file inside the managed code root.",
+            )
+        target = resolved_root / relative
+        if target.is_symlink():
+            raise WorkspaceError(
+                code="unsafe_candidate_code_path",
+                message=f"Managed code path is a symbolic link: {rel_path}",
+                next_action="Replace symbolic links with real files inside the code root.",
+            )
+        try:
+            target.resolve(strict=True).relative_to(resolved_root)
+        except (OSError, ValueError) as error:
+            raise WorkspaceError(
+                code="unsafe_candidate_code_path",
+                message=f"Managed code path escapes the code root: {rel_path}",
+                next_action="Choose a file inside the managed code root.",
+            ) from error
+        try:
+            return target.read_bytes()
+        except OSError as error:
+            raise WorkspaceError(
+                code="candidate_code_not_found",
+                message=f"Candidate code cannot be read: {rel_path}",
+                next_action="Restore the managed code inside the code root.",
+            ) from error
+
+    def list_code_revisions(
+        self, connection_path: Path, code_id: str
+    ) -> tuple[CodeRevisionSnapshot, ...]:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        repo = self._code_revision_repository(repository.repository_path)
+        return repo.list_revisions(code_id)
+
+    def _find_instances_for_fingerprint(
+        self, repository_path: Path, fingerprint: str
+    ) -> tuple[tuple[str, str], ...]:
+        runs_path = repository_path / "runs"
+        if not runs_path.is_dir():
+            return ()
+        refs: list[tuple[str, str]] = []
+        for run_dir in sorted(runs_path.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            instances_path = run_dir / "instances"
+            if not instances_path.is_dir():
+                continue
+            for inst_dir in sorted(instances_path.iterdir()):
+                if not inst_dir.is_dir():
+                    continue
+                manifest_path = inst_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("code_fingerprint") == fingerprint
+                ):
+                    refs.append((run_dir.name, inst_dir.name))
+        return tuple(refs)
+
+    def get_code_review(
+        self,
+        connection_path: Path,
+        code_root: Path,
+        code_id: str | None,
+    ) -> CodeReviewSnapshot:
+        resolved_root = self._require_managed_code_root(connection_path, code_root)
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        repo = self._code_revision_repository(repository.repository_path)
+        candidate_files = self._discover_managed_files(resolved_root)
+        resolved_code_id = code_id or ""
+        history = repo.list_revisions(resolved_code_id) if resolved_code_id else ()
+        active = history[0] if history else None
+        entrypoint = (
+            active.entrypoint_path
+            if active is not None
+            else (candidate_files[0].path if candidate_files else "")
+        )
+        workspace_fingerprint = (
+            compute_code_fingerprint(candidate_files) if candidate_files else None
+        )
+        if active is None:
+            workspace_changed = workspace_fingerprint is not None
+        else:
+            workspace_changed = workspace_fingerprint != active.revision_fingerprint
+        instance_refs = (
+            self._find_instances_for_fingerprint(
+                repository.repository_path, active.revision_fingerprint
+            )
+            if active is not None
+            else ()
+        )
+        files = tuple(
+            ManagedFileEntry(
+                path=f.path,
+                size_bytes=f.size_bytes,
+                sha256=f.sha256,
+                is_entrypoint=(f.path == entrypoint),
+            )
+            for f in candidate_files
+        )
+        return CodeReviewSnapshot(
+            code_id=resolved_code_id,
+            code_root=str(code_root),
+            managed_root_ok=True,
+            files=files,
+            active_revision=active,
+            history=history,
+            workspace_changed=workspace_changed,
+            active_instance_refs=instance_refs,
+        )
+
+    def save_code_revision(
+        self, command: SaveCodeRevisionCommand
+    ) -> CodeRevisionSnapshot:
+        """Persist an edit as a NEW immutable Code Revision (never mutates active).
+
+        Single atomic flow: (1) managed-root gate, (2) family-level optimistic
+        concurrency via ``expected_parent_fingerprint`` → ``stale_code_revision``,
+        (3) write edited bytes back to the workspace through the jail,
+        (4) re-read ALL managed files and compute the content fingerprint,
+        (5) create the revision. The frozen ``runs/<run>/code-revisions/`` layer
+        is untouched, so a running Training Instance keeps its original code.
+        """
+        resolved_root = self._require_managed_code_root(
+            command.connection_path, command.code_root
+        )
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        repo = self._code_revision_repository(repository.repository_path)
+        latest = repo.latest(command.code_id)
+        if command.expected_parent_fingerprint is None:
+            if latest is not None:
+                raise WorkspaceError(
+                    code="stale_code_revision",
+                    message="A Code Revision already exists for this code id.",
+                    next_action="Reload the code review and edit from the latest revision.",
+                )
+            parent_id = None
+            parent_fingerprint = None
+        else:
+            if (
+                latest is None
+                or latest.revision_fingerprint
+                != command.expected_parent_fingerprint
+            ):
+                raise WorkspaceError(
+                    code="stale_code_revision",
+                    message="The active Code Revision changed while you were editing.",
+                    next_action="Reload the code review, review the new revision, and re-apply your edits.",
+                )
+            parent_id = latest.asset_id
+            parent_fingerprint = latest.revision_fingerprint
+        # apply edits to the workspace (jail-gated, atomic per file)
+        for edited in command.edited_files:
+            relative = Path(edited.path)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise WorkspaceError(
+                    code="unsafe_candidate_code_path",
+                    message=f"Edited code path is not relative: {edited.path}",
+                    next_action="Keep edited files inside the managed code root.",
+                )
+            target = resolved_root / relative
+            if target.is_symlink():
+                raise WorkspaceError(
+                    code="unsafe_candidate_code_path",
+                    message=f"Edited code path is a symbolic link: {edited.path}",
+                    next_action="Replace symbolic links with real files inside the code root.",
+                )
+            try:
+                target.resolve(strict=False).relative_to(resolved_root)
+            except ValueError as error:
+                raise WorkspaceError(
+                    code="unsafe_candidate_code_path",
+                    message=f"Edited code path escapes the code root: {edited.path}",
+                    next_action="Keep edited files inside the managed code root.",
+                ) from error
+            temporary = target.with_name(
+                f".{target.name}.cr-tmp-{uuid.uuid4().hex}"
+            )
+            try:
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_bytes(edited.content)
+                temporary.replace(target)
+            except OSError as error:
+                temporary.unlink(missing_ok=True)
+                raise WorkspaceError(
+                    code="code_revision_write_failed",
+                    message=f"The edited code could not be written: {edited.path}",
+                    next_action="Check workspace permissions and retry the save.",
+                ) from error
+        # re-read ALL managed files and compute the content fingerprint
+        candidate_files = self._discover_managed_files(resolved_root)
+        if not candidate_files:
+            raise WorkspaceError(
+                code="candidate_code_not_found",
+                message="No managed Python files remain after the edit.",
+                next_action="Restore at least one .py file under the code root before saving.",
+            )
+        if command.entrypoint_path not in {f.path for f in candidate_files}:
+            raise WorkspaceError(
+                code="invalid_training_entrypoint",
+                message="Entrypoint is not among the managed code files.",
+                next_action="Choose an entrypoint .py file that exists under the code root.",
+            )
+        code_fingerprint = compute_code_fingerprint(candidate_files)
+        files_bytes: dict[str, bytes] = {
+            f.path: (resolved_root / f.path).read_bytes() for f in candidate_files
+        }
+        return repo.create(
+            code_id=command.code_id,
+            code_fingerprint=code_fingerprint,
+            entrypoint_path=command.entrypoint_path,
+            files=candidate_files,
+            files_bytes=files_bytes,
+            parent_revision_id=parent_id,
+            parent_revision_fingerprint=parent_fingerprint,
+            change_summary=command.change_summary,
+            origin=command.origin,
+            source_run_id=command.source_run_id,
+            source_instance_id=command.source_instance_id,
+            created_by=command.created_by,
+            capacity=repository.capacity,
+        )
+
+    def diff_code_revisions(
+        self,
+        connection_path: Path,
+        code_id: str,
+        parent_version: int | None,
+        child_version: int,
+    ) -> CodeRevisionDiff:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        repo = self._code_revision_repository(repository.repository_path)
+        parent = repo.load(code_id, parent_version) if parent_version else None
+        child = repo.load(code_id, child_version)
+        parent_bytes = (
+            repo.read_all_file_bytes(code_id, parent_version)
+            if parent is not None
+            else {}
+        )
+        child_bytes = repo.read_all_file_bytes(code_id, child_version)
+        deltas: list[CodeFileDelta] = []
+        for path in sorted(set(parent_bytes) | set(child_bytes)):
+            old_raw = parent_bytes.get(path)
+            new_raw = child_bytes.get(path)
+            if old_raw is None:
+                status = "added"
+            elif new_raw is None:
+                status = "removed"
+            elif old_raw == new_raw:
+                status = "unchanged"
+            else:
+                status = "modified"
+            if status == "unchanged":
+                diff_text = ""
+            else:
+                old_lines = (
+                    old_raw.decode("utf-8").splitlines(keepends=True)
+                    if old_raw is not None
+                    else []
+                )
+                new_lines = (
+                    new_raw.decode("utf-8").splitlines(keepends=True)
+                    if new_raw is not None
+                    else []
+                )
+                fromfile = (
+                    f"v{parent_version}/{path}" if parent is not None else path
+                )
+                tofile = f"v{child_version}/{path}"
+                diff_text = "".join(
+                    difflib.unified_diff(
+                        old_lines,
+                        new_lines,
+                        fromfile=fromfile,
+                        tofile=tofile,
+                        lineterm="",
+                    )
+                )
+            deltas.append(
+                CodeFileDelta(path=path, status=status, diff_text=diff_text)
+            )
+        return CodeRevisionDiff(
+            code_id=code_id,
+            parent_version=parent_version,
+            child_version=child_version,
+            files=tuple(deltas),
+        )
 
     @staticmethod
     def _require_approved_dataset_binding(

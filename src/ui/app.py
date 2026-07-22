@@ -17,9 +17,11 @@ from src.domain.core import DomainCore
 from src.domain.models import (
     ApproveExplorationPlanCommand,
     AuthorizeTrainingCommand,
+    CodeReviewSnapshot,
     CreateSopCandidateCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
+    EditedFile,
     ExperienceContent,
     ExperienceSnapshot,
     ExplorationReviewSnapshot,
@@ -30,6 +32,7 @@ from src.domain.models import (
     ReviewExperienceCommand,
     ReviewSopCandidateCommand,
     RunStatusSnapshot,
+    SaveCodeRevisionCommand,
     SopCandidateStatus,
     SopVersionSnapshot,
     WorkspaceError,
@@ -74,7 +77,21 @@ def main() -> None:
         st.caption(error.next_action)
         return
 
+    try:
+        code_id = core.resolve_code_id(connection_path, code_root)
+        code_review = core.get_code_review(connection_path, code_root, code_id)
+    except WorkspaceError:
+        code_review = None  # code root not managed; Code Review module shows a notice
+
     inspection = st.session_state.get("dataset_inspection")
+    code_review_status: str | None = None
+    if code_review is not None:
+        if code_review.workspace_changed:
+            code_review_status = "Workspace changed"
+        elif code_review.active_revision is not None:
+            code_review_status = "Approved"
+        elif code_review.files:
+            code_review_status = "Pending confirmation"
     shell = build_shell_state(
         snapshot,
         dataset,
@@ -84,6 +101,7 @@ def main() -> None:
         experiences,
         sop_candidates,
         sop_versions,
+        code_review_status=code_review_status,
     )
     with st.sidebar:
         st.title("MLagent")
@@ -115,7 +133,15 @@ def main() -> None:
     st.subheader(selected_module, anchor=_module_anchor(selected_module))
     st.caption(shell.module_status[selected_module])
 
-    if selected_module == "Dataset Overview":
+    if selected_module == "Code Review":
+        _render_code_review(
+            core,
+            connection_path,
+            code_root,
+            code_review,
+            snapshot.actor_id,
+        )
+    elif selected_module == "Dataset Overview":
         _render_dataset_overview(core, shell.dataset, shell.inspection)
     elif selected_module == "Run Status":
         _render_run_status(
@@ -895,6 +921,176 @@ def _render_action_error(error: ValueError | WorkspaceError) -> None:
         st.caption(error.next_action)
     else:
         st.error(str(error))
+
+
+def _render_code_review(
+    core: DomainCore,
+    connection_path: Path,
+    code_root: Path,
+    code_review: CodeReviewSnapshot | None,
+    actor_id: str,
+) -> None:
+    if code_review is None:
+        st.info(
+            "Code root is not inside the connected workspace. "
+            "Configure MLAGENT_CODE_ROOT to review managed code."
+        )
+        return
+    code_id = code_review.code_id
+    if not code_id:
+        st.info(
+            "Register a stable code id to start tracking Code Revisions for this code root."
+        )
+        with st.form("register_code_id"):
+            new_id = st.text_input("Code id (slug)", value="baseline")
+            if st.form_submit_button("Register code id"):
+                try:
+                    core.register_code_id(connection_path, code_root, new_id)
+                except (ValueError, WorkspaceError) as error:
+                    _render_action_error(error)
+                else:
+                    st.rerun()
+        return
+
+    active = code_review.active_revision
+    if code_review.active_instance_refs:
+        st.info(
+            f"🔒 Active/Frozen — referenced by "
+            f"{len(code_review.active_instance_refs)} training instance(s). "
+            "The frozen code is immutable; edits create new candidate revisions."
+        )
+    if code_review.workspace_changed:
+        st.warning(
+            "Workspace code changed since the last Code Revision. "
+            "Saving will capture the current state as a new revision."
+        )
+    if active is not None:
+        st.caption(
+            f"Active: v{active.version} · origin {active.origin} · "
+            f"{active.created_by} · {active.created_at} · "
+            f"fingerprint {active.revision_fingerprint[:12]}"
+        )
+
+    files = code_review.files
+    if not files:
+        st.warning("No managed Python files under the code root.")
+        return
+
+    entrypoint = active.entrypoint_path if active is not None else files[0].path
+    file_paths = [f.path for f in files]
+    selected_path = st.selectbox(
+        "File",
+        file_paths,
+        index=file_paths.index(entrypoint) if entrypoint in file_paths else 0,
+    )
+    try:
+        content = core.read_managed_file(connection_path, code_root, selected_path)
+    except (ValueError, WorkspaceError) as error:
+        _render_action_error(error)
+        return
+    text = content.decode("utf-8")
+
+    st.caption("Viewer (read-only)")
+    st.code(text, language="python")
+
+    frozen = bool(code_review.active_instance_refs) and active is not None
+    if frozen:
+        st.caption(
+            "Editor disabled: the active revision is frozen by a training instance."
+        )
+    else:
+        with st.form("save_code_revision"):
+            edited_text = st.text_area("Edit code", value=text, height=360)
+            col_summary, col_origin = st.columns(2)
+            with col_summary:
+                change_summary = st.text_input(
+                    "Change summary",
+                    value="",
+                    help="Required for versions after the first.",
+                )
+            with col_origin:
+                origin = st.selectbox("Origin", ["human", "agent", "system"], index=0)
+            if st.form_submit_button("Save as new Code Revision"):
+                expected = active.revision_fingerprint if active is not None else None
+                command = SaveCodeRevisionCommand(
+                    connection_path=connection_path,
+                    code_root=code_root,
+                    code_id=code_id,
+                    entrypoint_path=entrypoint,
+                    edited_files=(
+                        EditedFile(
+                            path=selected_path,
+                            content=edited_text.encode("utf-8"),
+                        ),
+                    ),
+                    expected_parent_fingerprint=expected,
+                    change_summary=change_summary,
+                    created_by=actor_id,
+                    origin=origin,
+                )
+                try:
+                    core.save_code_revision(command)
+                except (ValueError, WorkspaceError) as error:
+                    _render_action_error(error)
+                else:
+                    st.rerun()
+
+    if code_review.history:
+        st.subheader("Revision history")
+        rows = []
+        for revision in code_review.history:
+            related = ""
+            if active is not None and revision.version == active.version:
+                related = ", ".join(
+                    f"{run_id}/{inst_id}"
+                    for run_id, inst_id in code_review.active_instance_refs
+                )
+            rows.append(
+                {
+                    "Version": f"v{revision.version}",
+                    "Origin": revision.origin,
+                    "Author": revision.created_by,
+                    "Time": revision.created_at,
+                    "Change": revision.change_summary or "(initial)",
+                    "Run/Instance": related,
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        st.subheader("Compare revisions")
+        versions = [revision.version for revision in code_review.history]
+        col_parent, col_child = st.columns(2)
+        with col_parent:
+            parent_v = st.selectbox(
+                "From (older)",
+                options=versions,
+                index=min(1, len(versions) - 1),
+                key="code_review_diff_parent",
+            )
+        with col_child:
+            child_v = st.selectbox(
+                "To (newer)",
+                options=versions,
+                index=0,
+                key="code_review_diff_child",
+            )
+        if parent_v != child_v:
+            try:
+                diff = core.diff_code_revisions(
+                    connection_path, code_id, parent_v, child_v
+                )
+            except (ValueError, WorkspaceError) as error:
+                _render_action_error(error)
+            else:
+                showed = False
+                for delta in diff.files:
+                    if delta.status == "unchanged":
+                        continue
+                    showed = True
+                    st.caption(f"{delta.path} — {delta.status}")
+                    st.code(delta.diff_text)
+                if not showed:
+                    st.caption("No textual differences between the selected revisions.")
 
 
 def _render_experience_review(

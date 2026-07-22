@@ -708,6 +708,156 @@ class SopVersionSnapshot:
 
 
 @dataclass(frozen=True)
+class ManagedFileEntry:
+    path: str
+    size_bytes: int
+    sha256: str
+    is_entrypoint: bool
+
+
+@dataclass(frozen=True)
+class CodeFileDelta:
+    path: str
+    status: str
+    diff_text: str
+
+
+@dataclass(frozen=True)
+class CodeRevisionSnapshot:
+    asset_id: str
+    asset_path: str
+    code_id: str
+    version: int
+    revision_fingerprint: str
+    parent_revision_id: str | None
+    parent_revision_fingerprint: str | None
+    code_fingerprint: str
+    entrypoint_path: str
+    files: tuple[CandidateCodeFile, ...]
+    origin: str
+    source_run_id: str | None
+    source_instance_id: str | None
+    change_summary: str
+    created_at: str
+    created_by: str
+    asset_type: str = "code_revision"
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.code_id, "code_id")
+        _validate_safe_id(self.asset_id, "asset_id")
+        _validate_safe_asset_path(self.asset_path, "asset_path")
+        _validate_positive(self.version, "version")
+        _validate_sha256(self.revision_fingerprint, "revision_fingerprint")
+        _validate_sha256(self.code_fingerprint, "code_fingerprint")
+        _validate_state(self.origin, _CODE_REVISION_ORIGINS, "origin")
+        _validate_non_empty(self.entrypoint_path, "entrypoint_path")
+        _validate_non_empty(self.created_at, "created_at")
+        _validate_non_empty(self.created_by, "created_by")
+        if self.asset_type != "code_revision":
+            raise ValueError("asset_type must be code_revision")
+        if not isinstance(self.files, tuple) or not self.files:
+            raise ValueError("code revision must list at least one file")
+        for item in self.files:
+            if not isinstance(item, CandidateCodeFile):
+                raise ValueError("files must be CandidateCodeFile instances")
+        if self.version == 1:
+            if self.parent_revision_id is not None:
+                raise ValueError("version 1 cannot have parent_revision_id")
+            if self.parent_revision_fingerprint is not None:
+                raise ValueError(
+                    "version 1 cannot have parent_revision_fingerprint"
+                )
+        else:
+            _validate_safe_id(
+                self.parent_revision_id,
+                "parent_revision_id",
+            )
+            _validate_sha256(
+                self.parent_revision_fingerprint,
+                "parent_revision_fingerprint",
+            )
+            _validate_non_empty(self.change_summary, "change_summary")
+        if not self.entrypoint_path.endswith(".py"):
+            raise ValueError("entrypoint must be a .py file")
+        if self.entrypoint_path not in {item.path for item in self.files}:
+            raise ValueError("entrypoint must be one of the recorded files")
+        if self.code_fingerprint != self.revision_fingerprint:
+            raise ValueError("code_fingerprint must mirror revision_fingerprint")
+        if self.source_run_id is not None:
+            _validate_safe_id(self.source_run_id, "source_run_id")
+        if self.source_instance_id is not None:
+            _validate_safe_id(self.source_instance_id, "source_instance_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_jsonable(self)
+
+
+@dataclass(frozen=True)
+class CodeRevisionDiff:
+    code_id: str
+    parent_version: int | None
+    child_version: int
+    files: tuple[CodeFileDelta, ...]
+
+
+@dataclass(frozen=True)
+class CodeReviewSnapshot:
+    code_id: str
+    code_root: str
+    managed_root_ok: bool
+    files: tuple[ManagedFileEntry, ...]
+    active_revision: CodeRevisionSnapshot | None
+    history: tuple[CodeRevisionSnapshot, ...]
+    workspace_changed: bool
+    active_instance_refs: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class EditedFile:
+    path: str
+    content: bytes
+
+
+@dataclass(frozen=True)
+class SaveCodeRevisionCommand:
+    connection_path: Path
+    code_root: Path
+    code_id: str
+    entrypoint_path: str
+    edited_files: tuple[EditedFile, ...]
+    expected_parent_fingerprint: str | None
+    change_summary: str
+    created_by: str
+    origin: str = "human"
+    source_run_id: str | None = None
+    source_instance_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.code_id, "code_id")
+        _validate_non_empty(self.entrypoint_path, "entrypoint_path")
+        if not isinstance(self.edited_files, tuple) or not self.edited_files:
+            raise ValueError("edited_files must be a non-empty tuple")
+        for item in self.edited_files:
+            if not isinstance(item, EditedFile):
+                raise ValueError("edited_files must contain EditedFile instances")
+            _validate_non_empty(item.path, "edited_files.path")
+            if not isinstance(item.content, (bytes, bytearray)):
+                raise ValueError("edited_files.content must be bytes")
+        if self.expected_parent_fingerprint is not None:
+            _validate_sha256(
+                self.expected_parent_fingerprint,
+                "expected_parent_fingerprint",
+            )
+        _validate_non_empty(self.change_summary, "change_summary")
+        _validate_non_empty(self.created_by, "created_by")
+        _validate_state(self.origin, _CODE_REVISION_ORIGINS, "origin")
+        if self.source_run_id is not None:
+            _validate_safe_id(self.source_run_id, "source_run_id")
+        if self.source_instance_id is not None:
+            _validate_safe_id(self.source_instance_id, "source_instance_id")
+
+
+@dataclass(frozen=True)
 class FormalModelSnapshot:
     asset_id: str
     asset_path: str
@@ -1560,6 +1710,8 @@ _SOP_CANDIDATE_STATES = frozenset(
         "rejected",
     }
 )
+_CODE_REVISION_ORIGINS = frozenset({"human", "agent", "system"})
+CODE_REVISION_SCHEMA_VERSION = 1
 _EXPERIENCE_CONTENT_FIELDS = (
     "conclusion",
     "applicability",

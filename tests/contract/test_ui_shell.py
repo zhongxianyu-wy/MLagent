@@ -201,6 +201,7 @@ def test_shell_exposes_the_approved_global_status_vocabulary():
         "Syncing",
         "Pending Sync",
         "Conflict",
+        "Workspace changed",
     )
 
 

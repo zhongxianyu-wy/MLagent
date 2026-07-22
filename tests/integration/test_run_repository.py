@@ -11,10 +11,13 @@ from src.domain.memory_repository import MemoryRepository
 from src.domain.models import (
     CandidateCodeFile,
     CapacityStatus,
+    EditedFile,
     ExperienceCitation,
+    SaveCodeRevisionCommand,
     TrainingExecutionResult,
     WorkspaceError,
 )
+from src.domain.core import DomainCore
 from src.domain.run_repository import (
     ALLOWED_EVENT_FIELDS,
     InstancePreparationSpec,
@@ -280,6 +283,77 @@ def test_code_revision_freezes_exact_approved_files(run_workspace):
     )
     assert "build_estimator" in (
         frozen.parent / "files" / "train.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_training_instance_keeps_frozen_revision_after_candidate_edit(
+    run_workspace, tmp_path
+):
+    """AC#6: a candidate Code Revision save never touches the frozen layer."""
+    run_workspace.start()
+    frozen = run_workspace.freeze_code()
+    frozen_file = run_workspace.memory_root / frozen.asset_path
+    frozen_bytes_before = (frozen_file.parent / "files" / "train.py").read_bytes()
+    frozen_fingerprint = frozen.code_fingerprint
+
+    # build a connection so DomainCore can save CANDIDATE Code Revisions
+    connection = tmp_path / ".mlagent-workspace.json"
+    connection.write_text(
+        json.dumps(
+            {
+                "repository_path": str(run_workspace.memory_root),
+                "actor_id": "alice",
+            }
+        )
+    )
+    core = DomainCore(clock=lambda: "2026-07-22T00:00:00Z")
+    core.register_code_id(connection, run_workspace.code_root, "baseline")
+    v1 = core.save_code_revision(
+        SaveCodeRevisionCommand(
+            connection_path=connection,
+            code_root=run_workspace.code_root,
+            code_id="baseline",
+            entrypoint_path="train.py",
+            edited_files=(
+                EditedFile(
+                    path="train.py",
+                    content=(run_workspace.code_root / "train.py").read_bytes(),
+                ),
+            ),
+            expected_parent_fingerprint=None,
+            change_summary="initial",
+            created_by="alice",
+        )
+    )
+    # candidate v2 with different bytes
+    core.save_code_revision(
+        SaveCodeRevisionCommand(
+            connection_path=connection,
+            code_root=run_workspace.code_root,
+            code_id="baseline",
+            entrypoint_path="train.py",
+            edited_files=(
+                EditedFile(
+                    path="train.py",
+                    content=b"def build_estimator(c):\n    return 999\n",
+                ),
+            ),
+            expected_parent_fingerprint=v1.revision_fingerprint,
+            change_summary="tweak",
+            created_by="alice",
+        )
+    )
+
+    # the frozen layer is untouched
+    assert (
+        frozen_file.parent / "files" / "train.py"
+    ).read_bytes() == frozen_bytes_before
+    reloaded = run_workspace.repository.load_code_revision(
+        "run-1", frozen_fingerprint
+    )
+    assert reloaded.code_fingerprint == frozen_fingerprint
+    assert "build_estimator" in (
+        frozen_file.parent / "files" / "train.py"
     ).read_text(encoding="utf-8")
 
 
