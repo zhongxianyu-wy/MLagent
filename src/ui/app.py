@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +20,7 @@ from src.domain.models import (
     ApproveExplorationPlanCommand,
     AuthorizeTrainingCommand,
     CodeReviewSnapshot,
+    CaptureClaudeChangesCommand,
     CreateSopCandidateCommand,
     DatasetInspection,
     DatasetVersionSnapshot,
@@ -33,6 +36,7 @@ from src.domain.models import (
     ReviewSopCandidateCommand,
     RunStatusSnapshot,
     SaveCodeRevisionCommand,
+    StartClaudeSessionCommand,
     SopCandidateStatus,
     SopVersionSnapshot,
     WorkspaceError,
@@ -1091,6 +1095,114 @@ def _render_code_review(
                     st.code(delta.diff_text)
                 if not showed:
                     st.caption("No textual differences between the selected revisions.")
+    _render_claude_cli(core, connection_path, code_root, code_review.code_id, actor_id)
+
+
+def _render_claude_cli(
+    core: DomainCore,
+    connection_path: Path,
+    code_root: Path,
+    code_id: str,
+    actor_id: str,
+) -> None:
+    st.divider()
+    st.subheader("Claude CLI (managed agent)")
+    if not code_id:
+        st.caption("Register a code id above to attach a Claude session.")
+        return
+    status = core.claude_session_status(connection_path, code_id)
+    st.caption(f"Session state: {status}")
+    handle = st.session_state.get("claude_handle")
+    disconnected = (
+        handle is None
+        or getattr(handle, "state", "released") in ("released", "error")
+        or status != "connected"
+    )
+    if disconnected:
+        if st.button("Attach Claude session", key="claude_attach"):
+            try:
+                handle = core.start_claude_session(
+                    StartClaudeSessionCommand(
+                        connection_path=connection_path,
+                        code_root=code_root,
+                        operator=actor_id,
+                    )
+                )
+                st.session_state["claude_handle"] = handle
+                st.rerun()
+            except (ValueError, WorkspaceError) as error:
+                _render_action_error(error)
+        return
+
+    prompt = st.text_area("Prompt", key="claude_prompt", height=120)
+    col_send, col_capture, col_disconnect = st.columns(3)
+    if col_send.button("Send", key="claude_send", type="primary") and prompt.strip():
+        stop_event = st.session_state.get("claude_stop")
+        if stop_event is None:
+            stop_event = threading.Event()
+            st.session_state["claude_stop"] = stop_event
+        stop_event.clear()
+        iterator, get_result = core.send_claude_prompt(
+            connection_path, handle, prompt, stop_requested=stop_event.is_set
+        )
+
+        def _stream():
+            for event in iterator:
+                if event.kind == "text":
+                    yield event.text
+                elif event.kind == "tool_use":
+                    yield f"\n▸ {event.tool_name}: {event.tool_input_summary}\n"
+                elif event.kind == "tool_result" and event.tool_status == "error":
+                    yield "\n✗ tool error\n"
+                elif event.kind == "error":
+                    yield f"\nERROR: {event.text}\n"
+
+        st.write_stream(_stream())
+        st.session_state["claude_last_result"] = get_result()
+        st.session_state["claude_last_prompt_hash"] = hashlib.sha256(
+            prompt.encode("utf-8")
+        ).hexdigest()
+    if col_capture.button("Capture as Code Revision", key="claude_capture"):
+        last = st.session_state.get("claude_last_result")
+        prompt_hash = st.session_state.get("claude_last_prompt_hash")
+        if last is None or not last.touched_files:
+            st.caption("No captured changes yet.")
+        elif not prompt_hash:
+            st.caption("Missing prompt context.")
+        else:
+            try:
+                review = core.get_code_review(connection_path, code_root, code_id)
+                expected = (
+                    review.active_revision.revision_fingerprint
+                    if review.active_revision
+                    else None
+                )
+                entrypoint = (
+                    review.active_revision.entrypoint_path
+                    if review.active_revision
+                    else (review.files[0].path if review.files else "")
+                )
+                core.capture_claude_changes(
+                    CaptureClaudeChangesCommand(
+                        connection_path=connection_path,
+                        code_root=code_root,
+                        code_id=code_id,
+                        handle_id=handle.handle_id,
+                        change_summary=last.tool_action_summary,
+                        touched_files=last.touched_files,
+                        entrypoint_path=entrypoint,
+                        expected_parent_fingerprint=expected,
+                        prompt_hash=prompt_hash,
+                        operator=actor_id,
+                    )
+                )
+                st.rerun()
+            except (ValueError, WorkspaceError) as error:
+                _render_action_error(error)
+    if col_disconnect.button("Disconnect", key="claude_disconnect"):
+        core.release_claude_session(connection_path, code_id)
+        st.session_state["claude_handle"] = None
+        st.rerun()
 
 
 def _render_experience_review(

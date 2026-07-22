@@ -36,6 +36,17 @@
             "statusMessage": "Checking MLagent training approval"
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/.claude/hooks/mlagent-write-jail.sh\"",
+            "timeout": 20,
+            "statusMessage": "Jailing managed-code write"
+          }
+        ]
       }
     ]
   }

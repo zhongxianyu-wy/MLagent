@@ -178,6 +178,7 @@ def test_manifest_does_not_store_editor_input_content(tmp_path):
         "parent_revision_fingerprint", "entrypoint_path", "origin",
         "source_run_id", "source_instance_id", "change_summary",
         "files", "created_at", "created_by", "manifest_fingerprint",
+        "agent_prompt_hash", "agent_tool_summary",
     }
     assert set(manifest.keys()) <= allowed
     assert not any(

@@ -740,6 +740,8 @@ class CodeRevisionSnapshot:
     change_summary: str
     created_at: str
     created_by: str
+    agent_prompt_hash: str | None = None
+    agent_tool_summary: str | None = None
     asset_type: str = "code_revision"
 
     def __post_init__(self) -> None:
@@ -787,6 +789,10 @@ class CodeRevisionSnapshot:
             _validate_safe_id(self.source_run_id, "source_run_id")
         if self.source_instance_id is not None:
             _validate_safe_id(self.source_instance_id, "source_instance_id")
+        if self.agent_prompt_hash is not None:
+            _validate_sha256(self.agent_prompt_hash, "agent_prompt_hash")
+        if self.agent_tool_summary is not None:
+            _validate_non_empty(self.agent_tool_summary, "agent_tool_summary")
 
     def to_dict(self) -> dict[str, Any]:
         return _to_jsonable(self)
@@ -831,6 +837,8 @@ class SaveCodeRevisionCommand:
     origin: str = "human"
     source_run_id: str | None = None
     source_instance_id: str | None = None
+    agent_prompt_hash: str | None = None
+    agent_tool_summary: str | None = None
 
     def __post_init__(self) -> None:
         _validate_safe_id(self.code_id, "code_id")
@@ -855,6 +863,115 @@ class SaveCodeRevisionCommand:
             _validate_safe_id(self.source_run_id, "source_run_id")
         if self.source_instance_id is not None:
             _validate_safe_id(self.source_instance_id, "source_instance_id")
+        if self.agent_prompt_hash is not None:
+            _validate_sha256(self.agent_prompt_hash, "agent_prompt_hash")
+        if self.agent_tool_summary is not None:
+            _validate_non_empty(self.agent_tool_summary, "agent_tool_summary")
+
+
+@dataclass(frozen=True)
+class ClaudeStreamEvent:
+    kind: str
+    sequence: int
+    text: str | None = None
+    tool_name: str | None = None
+    tool_input_summary: str | None = None
+    tool_status: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_state(self.kind, _CLAUDE_STREAM_KINDS, "kind")
+        _validate_positive(self.sequence, "sequence")
+        if self.text is not None:
+            _validate_non_empty(self.text, "text")
+        if self.tool_status is not None:
+            _validate_state(self.tool_status, _CLAUDE_TOOL_STATUSES, "tool_status")
+
+
+@dataclass(frozen=True)
+class ClaudeCliResult:
+    state: str
+    tool_action_summary: str
+    touched_files: tuple[str, ...]
+    started_at: str
+    ended_at: str
+    session_id: str | None = None
+    error_code: str | None = None
+    error_summary: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_state(self.state, _CLAUDE_RESULT_STATES, "state")
+        _validate_non_empty(self.tool_action_summary, "tool_action_summary")
+        if not isinstance(self.touched_files, tuple):
+            raise ValueError("touched_files must be a tuple")
+        if self.session_id is not None:
+            _validate_non_empty(self.session_id, "session_id")
+        if self.error_code is not None:
+            _validate_non_empty(self.error_code, "error_code")
+        if self.error_summary is not None:
+            _validate_non_empty(self.error_summary, "error_summary")
+
+
+@dataclass(frozen=True)
+class ClaudeSessionHandle:
+    handle_id: str
+    code_id: str
+    code_root: str
+    operator: str
+    acquired_at: str
+    state: str = "connected"
+    lease_id: str | None = None
+    session_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.handle_id, "handle_id")
+        _validate_safe_id(self.code_id, "code_id")
+        _validate_non_empty(self.code_root, "code_root")
+        _validate_non_empty(self.operator, "operator")
+        _validate_non_empty(self.acquired_at, "acquired_at")
+        _validate_state(self.state, _CLAUDE_SESSION_STATES, "state")
+        if self.lease_id is not None:
+            _validate_non_empty(self.lease_id, "lease_id")
+        if self.session_id is not None:
+            _validate_non_empty(self.session_id, "session_id")
+
+
+@dataclass(frozen=True)
+class StartClaudeSessionCommand:
+    connection_path: Path
+    code_root: Path
+    operator: str
+
+    def __post_init__(self) -> None:
+        _validate_non_empty(self.operator, "operator")
+
+
+@dataclass(frozen=True)
+class CaptureClaudeChangesCommand:
+    connection_path: Path
+    code_root: Path
+    code_id: str
+    handle_id: str
+    change_summary: str
+    touched_files: tuple[str, ...]
+    entrypoint_path: str
+    prompt_hash: str
+    operator: str
+    expected_parent_fingerprint: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_safe_id(self.code_id, "code_id")
+        _validate_safe_id(self.handle_id, "handle_id")
+        _validate_non_empty(self.change_summary, "change_summary")
+        _validate_non_empty(self.entrypoint_path, "entrypoint_path")
+        _validate_sha256(self.prompt_hash, "prompt_hash")
+        _validate_non_empty(self.operator, "operator")
+        if not isinstance(self.touched_files, tuple) or not self.touched_files:
+            raise ValueError("touched_files must be a non-empty tuple")
+        if self.expected_parent_fingerprint is not None:
+            _validate_sha256(
+                self.expected_parent_fingerprint,
+                "expected_parent_fingerprint",
+            )
 
 
 @dataclass(frozen=True)
@@ -1712,6 +1829,12 @@ _SOP_CANDIDATE_STATES = frozenset(
 )
 _CODE_REVISION_ORIGINS = frozenset({"human", "agent", "system"})
 CODE_REVISION_SCHEMA_VERSION = 1
+_CLAUDE_STREAM_KINDS = frozenset({"text", "tool_use", "tool_result", "system", "error"})
+_CLAUDE_TOOL_STATUSES = frozenset({"running", "ok", "error"})
+_CLAUDE_RESULT_STATES = frozenset({"completed", "stopped", "failed", "timed_out"})
+_CLAUDE_SESSION_STATES = frozenset(
+    {"connected", "waiting", "captured", "released", "error"}
+)
 _EXPERIENCE_CONTENT_FIELDS = (
     "conclusion",
     "applicability",

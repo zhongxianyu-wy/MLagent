@@ -90,6 +90,8 @@ class CodeRevisionRepository:
         source_instance_id: str | None,
         created_by: str,
         capacity: CapacityStatus,
+        agent_prompt_hash: str | None = None,
+        agent_tool_summary: str | None = None,
     ) -> CodeRevisionSnapshot:
         self._validate_managed_path(self.code_revisions_path)
         family_path = self.code_revisions_path / code_id
@@ -125,6 +127,8 @@ class CodeRevisionRepository:
             source_instance_id=source_instance_id,
             created_at=created_at,
             created_by=created_by,
+            agent_prompt_hash=agent_prompt_hash,
+            agent_tool_summary=agent_tool_summary,
         )
         manifest_bytes = self._manifest_bytes(manifest)
         encoded: dict[str, bytes] = {"manifest.json": manifest_bytes}
@@ -290,6 +294,8 @@ class CodeRevisionRepository:
         source_instance_id: str | None,
         created_at: str,
         created_by: str,
+        agent_prompt_hash: str | None = None,
+        agent_tool_summary: str | None = None,
     ) -> dict[str, Any]:
         manifest: dict[str, Any] = {
             "asset_type": "code_revision",
@@ -312,6 +318,8 @@ class CodeRevisionRepository:
             ],
             "created_at": created_at,
             "created_by": created_by,
+            "agent_prompt_hash": agent_prompt_hash,
+            "agent_tool_summary": agent_tool_summary,
         }
         manifest["manifest_fingerprint"] = CodeRevisionRepository._manifest_fingerprint(
             manifest
@@ -453,6 +461,8 @@ class CodeRevisionRepository:
             change_summary=manifest["change_summary"],
             created_at=manifest["created_at"],
             created_by=manifest["created_by"],
+            agent_prompt_hash=manifest.get("agent_prompt_hash"),
+            agent_tool_summary=manifest.get("agent_tool_summary"),
         )
 
     @staticmethod

@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
@@ -81,6 +82,9 @@ from src.domain.models import (
     EditedFile,
     ManagedFileEntry,
     SaveCodeRevisionCommand,
+    CaptureClaudeChangesCommand,
+    ClaudeSessionHandle,
+    StartClaudeSessionCommand,
 )
 from src.domain.notebook_parser import extract_notebook_code, parse_notebook
 from src.domain.notebook_repository import NotebookRepository
@@ -116,6 +120,10 @@ class DomainCore:
         sop_reproduction_instance_id_factory: Callable[[], str] | None = None,
         sop_training_executor_factory: Callable[[], Any] | None = None,
         clock: Callable[[], str] | None = None,
+        claude_executor_factory: Callable[[], Any] | None = None,
+        claude_lease_store_factory: Callable[[Path], Any] | None = None,
+        claude_epoch_clock: Callable[[], int] | None = None,
+        claude_lease_ttl_seconds: int = 900,
     ) -> None:
         self.dataset_id_factory = dataset_id_factory
         self.exploration_event_id_factory = exploration_event_id_factory
@@ -140,6 +148,10 @@ class DomainCore:
         )
         self.sop_training_executor_factory = sop_training_executor_factory
         self.clock = clock
+        self.claude_executor_factory = claude_executor_factory
+        self.claude_lease_store_factory = claude_lease_store_factory
+        self.claude_epoch_clock = claude_epoch_clock or (lambda: int(time.time()))
+        self.claude_lease_ttl_seconds = claude_lease_ttl_seconds
         self.memory_repository = MemoryRepository(
             id_factory=id_factory,
             clock=clock,
@@ -1915,6 +1927,8 @@ class DomainCore:
             source_instance_id=command.source_instance_id,
             created_by=command.created_by,
             capacity=repository.capacity,
+            agent_prompt_hash=command.agent_prompt_hash,
+            agent_tool_summary=command.agent_tool_summary,
         )
 
     def diff_code_revisions(
@@ -1984,6 +1998,166 @@ class DomainCore:
             child_version=child_version,
             files=tuple(deltas),
         )
+
+    # ------------------------------------------------------------------
+    # Claude CLI session (Issue #12)
+    # ------------------------------------------------------------------
+
+    def _session_timestamp(self) -> str:
+        if self.clock is not None:
+            return self.clock()
+        from datetime import UTC, datetime
+
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+    def _claude_lease_store(self, repository_path: Path):
+        if self.claude_lease_store_factory is not None:
+            return self.claude_lease_store_factory(repository_path)
+        from src.scheduler.lease import IdleSchedulerLeaseStore
+
+        return IdleSchedulerLeaseStore(
+            str(repository_path / ".mlagent-local" / "claude_lease.db")
+        )
+
+    def _claude_epoch_now(self) -> int:
+        return self.claude_epoch_clock()
+
+    def _claude_executor(self):
+        if self.claude_executor_factory is not None:
+            return self.claude_executor_factory()
+        from src.domain.claude_cli_executor import SubprocessClaudeExecutor
+
+        return SubprocessClaudeExecutor()
+
+    def start_claude_session(
+        self, command: StartClaudeSessionCommand
+    ) -> ClaudeSessionHandle:
+        self._require_managed_code_root(command.connection_path, command.code_root)
+        code_id = self.resolve_code_id(command.connection_path, command.code_root)
+        if not code_id:
+            raise WorkspaceError(
+                code="code_id_not_registered",
+                message="A code id must be registered before attaching a Claude session.",
+                next_action="Register a code id in the Code Review module first.",
+            )
+        connection = self._load_connection(command.connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        lease_store = self._claude_lease_store(repository.repository_path)
+        lease = lease_store.acquire_lease(
+            lease_type=f"claude_write_session:{code_id}",
+            owner_id=command.operator,
+            now=self._claude_epoch_now(),
+            ttl_seconds=self.claude_lease_ttl_seconds,
+        )
+        if lease is None:
+            raise WorkspaceError(
+                code="claude_session_busy",
+                message="Another Claude write session is active for this code id.",
+                next_action="Disconnect the other session or wait for its lease to expire.",
+            )
+        return ClaudeSessionHandle(
+            handle_id=f"claude-session-{uuid.uuid4()}",
+            code_id=code_id,
+            code_root=str(command.code_root),
+            operator=command.operator,
+            acquired_at=self._session_timestamp(),
+            lease_id=lease.lease_id,
+        )
+
+    def send_claude_prompt(
+        self,
+        connection_path: Path,
+        handle: ClaudeSessionHandle,
+        prompt: str,
+        *,
+        stop_requested: Callable[[], bool] | None = None,
+        timeout_seconds: float = 600.0,
+    ):
+        workspace = connection_path.expanduser().resolve().parent
+        executor = self._claude_executor()
+        return executor.execute(
+            prompt,
+            cwd=Path(handle.code_root),
+            workspace=workspace,
+            session_id=handle.session_id,
+            allowed_tools=(
+                "Read",
+                "Edit",
+                "Write",
+                "MultiEdit",
+                "NotebookEdit",
+                "Bash",
+                "Glob",
+                "Grep",
+            ),
+            stop_requested=stop_requested or (lambda: False),
+            timeout_seconds=timeout_seconds,
+        )
+
+    def capture_claude_changes(
+        self, command: CaptureClaudeChangesCommand
+    ) -> CodeRevisionSnapshot:
+        resolved_root = self._require_managed_code_root(
+            command.connection_path, command.code_root
+        )
+        candidate_files = self._discover_managed_files(resolved_root)
+        files_by_path = {f.path: f for f in candidate_files}
+        edited_files: list[EditedFile] = []
+        for rel in command.touched_files:
+            if rel not in files_by_path:
+                continue
+            edited_files.append(
+                EditedFile(path=rel, content=(resolved_root / rel).read_bytes())
+            )
+        if not edited_files:
+            raise WorkspaceError(
+                code="no_capturable_changes",
+                message="None of the touched files are present in the managed code root.",
+                next_action="Have Claude edit a managed .py file before capturing.",
+            )
+        save_command = SaveCodeRevisionCommand(
+            connection_path=command.connection_path,
+            code_root=command.code_root,
+            code_id=command.code_id,
+            entrypoint_path=command.entrypoint_path,
+            edited_files=tuple(edited_files),
+            expected_parent_fingerprint=command.expected_parent_fingerprint,
+            change_summary=command.change_summary,
+            created_by=command.operator,
+            origin="agent",
+            agent_prompt_hash=command.prompt_hash,
+            agent_tool_summary=command.change_summary,
+        )
+        return self.save_code_revision(save_command)
+
+    def release_claude_session(
+        self, connection_path: Path, code_id: str
+    ) -> None:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        lease_store = self._claude_lease_store(repository.repository_path)
+        active = lease_store._active_lease(f"claude_write_session:{code_id}")
+        if active is not None:
+            lease_store.release(active.lease_id, status="released")
+
+    def claude_session_status(
+        self, connection_path: Path, code_id: str
+    ) -> str:
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        lease_store = self._claude_lease_store(repository.repository_path)
+        active = lease_store._active_lease(f"claude_write_session:{code_id}")
+        if active is None:
+            return "released"
+        if active.expires_at <= self._claude_epoch_now():
+            return "stale"
+        return "connected"
 
     @staticmethod
     def _require_approved_dataset_binding(
