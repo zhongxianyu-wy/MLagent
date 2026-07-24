@@ -61,6 +61,7 @@ from src.domain.models import (
     ReviewExperienceCommand,
     ReviewSopCandidateCommand,
     RunStatusSnapshot,
+    RunReplaySnapshot,
     SessionStopSyncCommand,
     SessionExperienceOutcome,
     SopCandidateSnapshot,
@@ -1278,6 +1279,66 @@ class DomainCore:
             actor_id=connection.actor_id,
         )
         return self._run_repository(repository.repository_path).list_statuses()
+
+    def get_run_replay(
+        self,
+        connection_path: Path,
+        run_id: str,
+    ) -> RunReplaySnapshot:
+        """Read-only replay aggregator: run timeline + plan/code linkage + SOP baselines.
+
+        Composes existing reads (never writes). SOP baselines are derived by
+        matching ``primary_metric_name`` + ``dataset_id`` + ``dataset_version``
+        because there is no stored run→SOP foreign key.
+        """
+        run = self.get_run_status(connection_path, run_id)
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        run_repository = self._run_repository(repository.repository_path)
+        exploration = self._exploration_repository(repository.repository_path)
+        sop = self._sop_repository(repository.repository_path)
+
+        start: dict[str, Any] = {}
+        try:
+            start = run_repository.load_run_start(run_id) or {}
+        except WorkspaceError:
+            start = {}
+        plan = None
+        code_fingerprint: str | None = None
+        code_entrypoint: str | None = None
+        plan_id = start.get("plan_id") if isinstance(start, dict) else None
+        plan_event_id = start.get("plan_event_id") if isinstance(start, dict) else None
+        if plan_id and plan_event_id:
+            try:
+                plan = exploration.load_plan_event(plan_id, plan_event_id)
+            except WorkspaceError:
+                plan = None
+        code_fingerprint = start.get("code_fingerprint") if isinstance(start, dict) else None
+        if code_fingerprint:
+            try:
+                code_revision = run_repository.load_code_revision(
+                    run_id, code_fingerprint
+                )
+                code_entrypoint = code_revision.entrypoint_path
+            except WorkspaceError:
+                code_entrypoint = None
+
+        sop_baselines = tuple(
+            version
+            for version in sop.list_sop_versions()
+            if version.primary_metric_name == run.primary_metric_name
+            and version.dataset_id == run.dataset_id
+            and version.dataset_version == run.dataset_version
+        )
+        return RunReplaySnapshot(
+            run=run,
+            plan=plan,
+            code_revision_fingerprint=code_fingerprint,
+            code_entrypoint=code_entrypoint,
+            sop_baselines=sop_baselines,
+        )
 
     def request_run_stop(
         self,

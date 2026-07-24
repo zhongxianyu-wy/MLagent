@@ -340,6 +340,7 @@ def _render_run_status(
         )
         _render_live_run(core, connection_path, selected_run)
         st.divider()
+        _render_run_replay(core, connection_path, selected_run)
     if review is None:
         if not run_statuses:
             st.info("No exploration plan recorded")
@@ -494,6 +495,99 @@ def _render_run_status(
                     f"Authorized for Issue #5 execution: "
                     f"{authorization.approval_id}"
                 )
+
+
+def _fmt_optional_metric(value: float | None) -> str:
+    return f"{value:.4f}" if value is not None else "—"
+
+
+def _render_run_replay(
+    core: DomainCore,
+    connection_path: Path,
+    run_id: str,
+) -> None:
+    """Read-only historical replay: timeline + performance curve + SOP baselines."""
+    try:
+        replay = core.get_run_replay(connection_path, run_id)
+    except (ValueError, WorkspaceError) as error:
+        _render_action_error(error)
+        return
+    run = replay.run
+    st.subheader("Historical replay")
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("State", _state_label(run.state))
+    with cols[1]:
+        st.metric("Best", _fmt_optional_metric(run.best_primary_metric_value))
+    with cols[2]:
+        st.metric("Target", f"{run.target_metric_value:.4f}")
+    with cols[3]:
+        st.metric("Target gap", _fmt_optional_metric(run.target_gap))
+
+    plan_label = replay.plan.plan_id if replay.plan is not None else "—"
+    code_label = (
+        replay.code_revision_fingerprint[:12]
+        if replay.code_revision_fingerprint
+        else "—"
+    )
+    st.caption(
+        f"Plan {plan_label} · code {code_label} ({replay.code_entrypoint or '—'})"
+    )
+
+    if run.rounds:
+        rows = [
+            {
+                "Round": rnd.round_number,
+                "Instance": rnd.instance_id,
+                "Direction": rnd.optimization_direction,
+                "Parent": rnd.parent_instance_id or "—",
+                "State": _state_label(rnd.instance_state),
+                "Metric": (
+                    f"{rnd.primary_metric_value:.4f}"
+                    if rnd.primary_metric_value is not None
+                    else "missing"
+                ),
+                "Error": rnd.error_code or "—",
+            }
+            for rnd in run.rounds
+        ]
+        st.dataframe(
+            pd.DataFrame(rows), use_container_width=True, hide_index=True
+        )
+
+    if run.performance_points:
+        curve = pd.DataFrame(
+            [
+                {
+                    "Round": point.round_number,
+                    run.primary_metric_name: point.primary_metric_value,
+                    "Target": run.target_metric_value,
+                }
+                for point in run.performance_points
+            ]
+        )
+        st.line_chart(curve, x="Round", y=[run.primary_metric_name, "Target"])
+    else:
+        st.info("No completed performance point")
+
+    if replay.sop_baselines:
+        st.markdown("**SOP baselines (matched metric + dataset)**")
+        sop_rows = [
+            {
+                "SOP": f"{version.sop_id} v{version.version}",
+                "SOP result": f"{version.primary_metric_value:.4f}",
+                "Reproduction": f"{version.reproduction_metric_value:.4f}",
+                "Approved by": version.created_by,
+            }
+            for version in replay.sop_baselines
+        ]
+        st.dataframe(
+            pd.DataFrame(sop_rows), use_container_width=True, hide_index=True
+        )
+
+    if run.state != "completed":
+        reason = run.stop_reason or run.recovery_reason or run.state
+        st.warning(f"Run did not complete cleanly: {reason}")
 
 
 def _render_sop_overview(

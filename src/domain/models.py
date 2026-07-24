@@ -1684,6 +1684,24 @@ class RunStatusSnapshot:
 
 
 @dataclass(frozen=True)
+class RunReplaySnapshot:
+    run: RunStatusSnapshot
+    plan: ExplorationPlanSnapshot | None
+    code_revision_fingerprint: str | None
+    code_entrypoint: str | None
+    sop_baselines: tuple[SopVersionSnapshot, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sop_baselines, tuple):
+            raise ValueError("sop_baselines must be a tuple")
+        for item in self.sop_baselines:
+            if not isinstance(item, SopVersionSnapshot):
+                raise ValueError(
+                    "sop_baselines must contain SopVersionSnapshot instances"
+                )
+
+
+@dataclass(frozen=True)
 class SyncStatusSnapshot:
     state: str
     branch: str | None
