@@ -1701,6 +1701,73 @@ class RunReplaySnapshot:
                 )
 
 
+_LINEAGE_NODE_TYPES = frozenset(
+    {
+        "dataset",
+        "plan",
+        "run",
+        "instance",
+        "experience",
+        "notebook",
+        "sop_candidate",
+        "sop_version",
+        "formal_model",
+    }
+)
+_LINEAGE_EDGE_KINDS = frozenset(
+    {
+        "source",
+        "used",
+        "produced",
+        "reproduced",
+        "approved",
+        "superseded",
+        "model_registered",
+    }
+)
+
+
+@dataclass(frozen=True)
+class LineageNode:
+    node_type: str
+    asset_id: str
+    version: str | None
+    state: str | None
+    primary_metric_value: float | None
+    missing_evidence: bool
+    created_at: str | None
+    label: str
+
+    def __post_init__(self) -> None:
+        _validate_state(self.node_type, _LINEAGE_NODE_TYPES, "node_type")
+        _validate_non_empty(self.asset_id, "asset_id")
+        _validate_non_empty(self.label, "label")
+
+    @property
+    def key(self) -> str:
+        return f"{self.node_type}:{self.asset_id}"
+
+
+@dataclass(frozen=True)
+class LineageEdge:
+    source_key: str
+    target_key: str
+    kind: str
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_state(self.kind, _LINEAGE_EDGE_KINDS, "kind")
+        _validate_non_empty(self.source_key, "source_key")
+        _validate_non_empty(self.target_key, "target_key")
+
+
+@dataclass(frozen=True)
+class LineageGraph:
+    nodes: tuple[LineageNode, ...]
+    edges: tuple[LineageEdge, ...]
+    broken_refs: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class SyncStatusSnapshot:
     state: str

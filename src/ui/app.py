@@ -170,6 +170,8 @@ def main() -> None:
             shell.sop_versions,
             sop_reviewer_policy_fingerprint,
         )
+    elif selected_module == "Lineage Trace":
+        _render_lineage(core, connection_path)
 
     for issue in shell.issues:
         st.warning(f"{issue['message']} {issue['next_action']}")
@@ -588,6 +590,83 @@ def _render_run_replay(
     if run.state != "completed":
         reason = run.stop_reason or run.recovery_reason or run.state
         st.warning(f"Run did not complete cleanly: {reason}")
+
+
+def _render_lineage(core: DomainCore, connection_path: Path) -> None:
+    """Read-only lineage graph + timeline (Issue #14)."""
+    try:
+        graph = core.get_lineage(connection_path)
+    except (ValueError, WorkspaceError) as error:
+        _render_action_error(error)
+        return
+    st.caption(f"{len(graph.nodes)} nodes · {len(graph.edges)} edges")
+    if graph.broken_refs:
+        st.warning(f"{len(graph.broken_refs)} broken lineage reference(s).")
+        with st.expander("Broken references", expanded=False):
+            st.write("\n".join(graph.broken_refs))
+
+    node_keys = {n.key for n in graph.nodes}
+    node_types = sorted({n.node_type for n in graph.nodes})
+    type_filter = st.selectbox(
+        "Filter by type", ["all"] + node_types, key="lineage_type_filter"
+    )
+    visible = {
+        n.key for n in graph.nodes
+        if type_filter == "all" or n.node_type == type_filter
+    }
+
+    dot_lines = ["digraph {"]
+    for n in graph.nodes:
+        if n.key not in visible:
+            continue
+        color = "red" if n.missing_evidence else "black"
+        safe_label = n.label.replace('"', "'")
+        dot_lines.append(f'  "{n.key}" [label="{safe_label}", color={color}];')
+    for e in graph.edges:
+        if e.source_key not in visible:
+            continue
+        style = "dashed" if e.target_key not in node_keys else "solid"
+        dot_lines.append(
+            f'  "{e.source_key}" -> "{e.target_key}" [label="{e.kind}", style={style}];'
+        )
+    dot_lines.append("}")
+    try:
+        st.graphviz_chart("\n".join(dot_lines))
+    except Exception:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Source": e.source_key, "Relation": e.kind, "Target": e.target_key}
+                    for e in graph.edges
+                    if e.source_key in visible
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    timeline = sorted(
+        [n for n in graph.nodes if n.created_at], key=lambda n: n.created_at or ""
+    )
+    if timeline:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Type": n.node_type,
+                        "Id": n.asset_id,
+                        "Version": n.version or "—",
+                        "State": n.state or "—",
+                        "Metric": _fmt_optional_metric(n.primary_metric_value),
+                        "Missing": n.missing_evidence,
+                        "Created": n.created_at,
+                    }
+                    for n in timeline
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def _render_sop_overview(

@@ -62,6 +62,9 @@ from src.domain.models import (
     ReviewSopCandidateCommand,
     RunStatusSnapshot,
     RunReplaySnapshot,
+    LineageEdge,
+    LineageGraph,
+    LineageNode,
     SessionStopSyncCommand,
     SessionExperienceOutcome,
     SopCandidateSnapshot,
@@ -728,6 +731,7 @@ class DomainCore:
         connection, repository = self._open_connected_repository(
             command.connection_path
         )
+        self._verify_candidate_lineage(command.connection_path, command.candidate_id)
         outcome = self._sop_repository(
             repository.repository_path
         ).review_candidate(
@@ -1339,6 +1343,164 @@ class DomainCore:
             code_entrypoint=code_entrypoint,
             sop_baselines=sop_baselines,
         )
+
+    def get_lineage(
+        self, connection_path: Path
+    ) -> LineageGraph:
+        """Read-only lineage graph across governed assets + broken-ref detection."""
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        run_repo = self._run_repository(repository.repository_path)
+        exploration = self._exploration_repository(repository.repository_path)
+        sop = self._sop_repository(repository.repository_path)
+        from src.domain.notebook_repository import NotebookRepository
+
+        notebook_repo = NotebookRepository(repository.repository_path)
+
+        nodes: dict[str, LineageNode] = {}
+        edges: list[LineageEdge] = []
+
+        def add_node(node_type, asset_id, *, version=None, state=None,
+                     primary_metric_value=None, missing_evidence=False,
+                     created_at=None, label=None):
+            key = f"{node_type}:{asset_id}"
+            if key not in nodes:
+                nodes[key] = LineageNode(
+                    node_type=node_type, asset_id=asset_id, version=version,
+                    state=state, primary_metric_value=primary_metric_value,
+                    missing_evidence=missing_evidence, created_at=created_at,
+                    label=label or asset_id,
+                )
+            return key
+
+        def add_edge(src, tgt, kind, detail=None):
+            if src and tgt:
+                edges.append(
+                    LineageEdge(source_key=src, target_key=tgt, kind=kind, detail=detail)
+                )
+
+        for ds in DatasetRepository(repository.repository_path)._snapshots():
+            add_node("dataset", ds.dataset_id, version=f"v{ds.version}", state=ds.state,
+                     label=f"{ds.dataset_id} v{ds.version}", created_at=ds.created_at)
+        latest_plan = exploration.latest()
+        if latest_plan is not None:
+            pkey = add_node("plan", latest_plan.plan_id, version=latest_plan.plan_event_id,
+                            state="recorded", label=f"plan {latest_plan.plan_id}",
+                            created_at=latest_plan.created_at)
+            add_edge(pkey, f"dataset:{latest_plan.dataset_id}", "used")
+        for status in self.list_run_statuses(connection_path):
+            rkey = add_node("run", status.run_id, state=status.state,
+                            primary_metric_value=status.best_primary_metric_value,
+                            label=f"run {status.run_id}", created_at=status.started_at)
+            add_edge(rkey, f"dataset:{status.dataset_id}", "used")
+            if status.plan_id:
+                add_node("plan", status.plan_id, state="referenced",
+                         label=f"plan {status.plan_id}", created_at=status.started_at)
+                add_edge(rkey, f"plan:{status.plan_id}", "used")
+            for inst in run_repo.list_instances(status.run_id):
+                ikey = add_node("instance", inst.asset_id, state=inst.state,
+                                primary_metric_value=inst.primary_metric_value,
+                                missing_evidence=(inst.state != "completed"),
+                                label=f"instance {inst.asset_id}", created_at=inst.started_at)
+                add_edge(rkey, ikey, "produced")
+                if inst.parent_instance_id:
+                    add_edge(ikey, f"instance:{inst.parent_instance_id}", "source")
+        try:
+            candidates = sop.list_candidates()
+        except WorkspaceError:
+            candidates = []
+        for cand in candidates:
+            ckey = add_node("sop_candidate", cand.asset_id, state=None,
+                            label=f"SOP candidate {cand.sop_id}", created_at=cand.created_at)
+            add_edge(ckey, f"run:{cand.source_run_id}", "source")
+            add_edge(ckey, f"instance:{cand.source_instance_id}", "source")
+            origin = getattr(cand, "notebook_origin", None)
+            if origin is not None and getattr(origin, "notebook_import_id", None):
+                add_edge(ckey, f"notebook:{origin.notebook_import_id}", "source")
+        try:
+            sop_versions = sop.list_sop_versions()
+        except WorkspaceError:
+            sop_versions = []
+        for ver in sop_versions:
+            vkey = add_node("sop_version", ver.asset_id, version=f"v{ver.version}",
+                            state="approved", primary_metric_value=ver.primary_metric_value,
+                            label=f"{ver.sop_id} v{ver.version}", created_at=ver.created_at)
+            add_edge(vkey, f"run:{ver.source_run_id}", "source")
+            add_edge(vkey, f"instance:{ver.source_instance_id}", "source")
+            add_edge(vkey, f"run:{ver.reproduction_run_id}", "reproduced")
+            add_edge(vkey, f"instance:{ver.reproduction_instance_id}", "reproduced")
+            if ver.previous_version_id:
+                add_edge(vkey, f"sop_version:{ver.previous_version_id}", "source")
+            if ver.formal_model_id:
+                add_edge(vkey, f"formal_model:{ver.formal_model_id}", "model_registered")
+                try:
+                    fm = sop.get_formal_model(ver.formal_model_id)
+                except WorkspaceError:
+                    fm = None
+                if fm is not None:
+                    fkey = add_node("formal_model", fm.asset_id, state="registered",
+                                    primary_metric_value=fm.primary_metric_value,
+                                    label=f"formal model {fm.asset_id}", created_at=fm.created_at)
+                    add_edge(fkey, vkey, "model_registered")
+                    add_edge(fkey, f"instance:{fm.source_instance_id}", "source")
+                    add_edge(fkey, f"instance:{fm.reproduction_instance_id}", "reproduced")
+        for exp in self.list_experiences(connection_path):
+            ekey = add_node("experience", exp.asset_id, state=exp.state,
+                            label=f"experience {exp.experience_id}", created_at=exp.created_at)
+            role_map = {"run": "run", "training_instance": "instance", "dataset": "dataset"}
+            for evidence in exp.evidence:
+                ttype = role_map.get(evidence.role)
+                if ttype:
+                    add_edge(ekey, f"{ttype}:{evidence.asset_id}", "used")
+        for nb in notebook_repo.list_imports():
+            nid = nb.get("asset_id") if isinstance(nb, dict) else None
+            if not nid:
+                continue
+            nkey = add_node("notebook", nid, state=nb.get("state"),
+                            label=f"notebook {nb.get('original_filename', nid)}",
+                            created_at=nb.get("created_at"))
+            inst_id = nb.get("training_instance_id")
+            if inst_id:
+                add_edge(nkey, f"instance:{inst_id}", "produced")
+
+        node_keys = set(nodes)
+        broken: set[str] = set()
+        deduped: list[LineageEdge] = []
+        seen: set[tuple[str, str, str]] = set()
+        for edge in edges:
+            sig = (edge.source_key, edge.target_key, edge.kind)
+            if sig in seen:
+                continue
+            seen.add(sig)
+            deduped.append(edge)
+            if edge.target_key not in node_keys:
+                broken.add(f"{edge.source_key} -{edge.kind}-> {edge.target_key}")
+        return LineageGraph(
+            nodes=tuple(nodes.values()),
+            edges=tuple(deduped),
+            broken_refs=tuple(sorted(broken)),
+        )
+
+    def verify_lineage_integrity(
+        self, connection_path: Path
+    ) -> tuple[str, ...]:
+        """Return broken-reference descriptions (AC#7). Read-only."""
+        return self.get_lineage(connection_path).broken_refs
+
+    def _verify_candidate_lineage(
+        self, connection_path: Path, candidate_id: str
+    ) -> None:
+        """AC#7: block SOP approval when the candidate's source lineage is broken."""
+        broken = self.verify_lineage_integrity(connection_path)
+        cand_key = f"sop_candidate:{candidate_id}"
+        if any(cand_key in ref for ref in broken):
+            raise WorkspaceError(
+                code="lineage_broken",
+                message="The SOP candidate references missing lineage targets.",
+                next_action="Restore the missing source/reproduction assets before approving.",
+            )
 
     def request_run_stop(
         self,
