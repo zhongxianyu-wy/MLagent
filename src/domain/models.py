@@ -1769,6 +1769,17 @@ class LineageGraph:
 
 
 @dataclass(frozen=True)
+class SessionContextSnapshot:
+    latest_plan_id: str | None
+    latest_plan_user_direction: str | None
+    recent_run_id: str | None
+    recent_run_state: str | None
+    recent_best_metric: float | None
+    pending_experience_count: int
+    pending_experience_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SyncStatusSnapshot:
     state: str
     branch: str | None

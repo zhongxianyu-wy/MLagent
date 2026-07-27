@@ -27,14 +27,17 @@ def handle(
         from src.domain.core import DomainCore
 
         domain_core = DomainCore()
-    outcome = domain_core.start_session(
-        resolve_connection_path(payload, environment or os.environ),
-        session_id,
-    )
+    connection_path = resolve_connection_path(payload, environment or os.environ)
+    outcome = domain_core.start_session(connection_path, session_id)
+    context = None
+    try:
+        context = domain_core.get_session_context(connection_path)
+    except (WorkspaceError, OSError, ValueError, TypeError):
+        context = None
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": bounded_session_start_message(outcome),
+            "additionalContext": bounded_session_start_message(outcome, context),
         }
     }
 

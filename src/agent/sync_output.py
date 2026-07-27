@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.domain.models import SessionExperienceOutcome, SyncStatusSnapshot
+from src.domain.models import SessionContextSnapshot, SessionExperienceOutcome, SyncStatusSnapshot
 
 
 STATE_LABELS = {
@@ -35,13 +35,36 @@ def bounded_sync_message(status: SyncStatusSnapshot) -> str:
     return _bounded(" ".join(parts))
 
 
+def bounded_session_context(context: SessionContextSnapshot | None) -> str:
+    if context is None:
+        return ""
+    parts = []
+    if context.latest_plan_id:
+        parts.append(f"Plan {context.latest_plan_id}.")
+    if context.recent_run_id:
+        metric = (
+            f" best {context.recent_best_metric:.4f}"
+            if context.recent_best_metric is not None
+            else ""
+        )
+        parts.append(
+            f"Run {context.recent_run_id} ({context.recent_run_state}{metric})."
+        )
+    if context.pending_experience_count:
+        parts.append(f"Pending experience: {context.pending_experience_count}.")
+    return _bounded(" ".join(parts))
+
+
 def bounded_session_start_message(
     outcome: SessionExperienceOutcome,
+    context: SessionContextSnapshot | None = None,
 ) -> str:
+    restore = bounded_session_context(context)
+    restore_clause = f" {restore}" if restore else ""
     return _bounded(
         f"Session {_clean(outcome.session_id, 100)}. "
         f"Experience Review: {outcome.pending_review_count} pending. "
-        f"{bounded_sync_message(_require_sync(outcome))}"
+        f"{bounded_sync_message(_require_sync(outcome))}{restore_clause}"
     )
 
 

@@ -65,6 +65,7 @@ from src.domain.models import (
     LineageEdge,
     LineageGraph,
     LineageNode,
+    SessionContextSnapshot,
     SessionStopSyncCommand,
     SessionExperienceOutcome,
     SopCandidateSnapshot,
@@ -1215,6 +1216,41 @@ class DomainCore:
         return self._experience_repository(
             repository.repository_path
         ).list_current(states)
+
+    def get_session_context(
+        self, connection_path: Path
+    ) -> SessionContextSnapshot:
+        """Read-only context restore for SessionStart (AC#2): latest plan,
+        recent run, pending experiences. Code-revision context lives in the
+        Code Review module (needs code_root); this aggregates the rest."""
+        connection = self._load_connection(connection_path)
+        repository = self.memory_repository.open(
+            connection.repository_path, actor_id=connection.actor_id
+        )
+        latest_plan = self._exploration_repository(
+            repository.repository_path
+        ).latest()
+        runs = self.list_run_statuses(connection_path)
+        recent = runs[0] if runs else None
+        pending = tuple(
+            exp for exp in self.list_experiences(connection_path)
+            if exp.state == "pending"
+        )
+        return SessionContextSnapshot(
+            latest_plan_id=latest_plan.plan_id if latest_plan else None,
+            latest_plan_user_direction=(
+                latest_plan.user_direction if latest_plan else None
+            ),
+            recent_run_id=recent.run_id if recent else None,
+            recent_run_state=recent.state if recent else None,
+            recent_best_metric=(
+                recent.best_primary_metric_value if recent else None
+            ),
+            pending_experience_count=len(pending),
+            pending_experience_ids=tuple(
+                exp.experience_id for exp in pending
+            ),
+        )
 
     def get_experience_history(
         self,
