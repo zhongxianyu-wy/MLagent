@@ -61,7 +61,8 @@ def evaluate_pre_tool_use_writes(
     targets = _extract_targets(tool_name, tool_input)
     if not targets:
         return None  # no path to jail
-    cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
+    code_root_env = os.environ.get("MLAGENT_CODE_ROOT")
+    cwd = code_root_env or payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
     workspace = os.environ.get("CLAUDE_PROJECT_DIR")
     if not cwd or not workspace:
         return _deny(

@@ -922,15 +922,45 @@ class DomainCore:
             capacity=repository.capacity,
         )
 
+        # Load the source instance's real input, environment, and split file
+        source_input = run_repo.load_instance_input(
+            sop.source_run_id, sop.source_instance_id
+        )
+        source_environment = run_repo.load_instance_environment(
+            sop.source_run_id, sop.source_instance_id
+        )
+        source_split_path = run_repo.load_instance_file(
+            sop.source_run_id, sop.source_instance_id, "split"
+        )
+
+        # Build configuration from the NEW dataset (mirrors run_execution._execute_rounds)
+        source_config = (
+            source_input.get("configuration", {})
+            if isinstance(source_input, dict)
+            else {}
+        )
+        configuration = {
+            "worker_contract": 1,
+            "task_type": dataset.task_type,
+            "class_labels": list(dataset.class_labels),
+            "positive_class": dataset.positive_class,
+            "primary_metric": dataset.primary_metric,
+            "target_metric": dataset.target_metric,
+            "evaluation_protocol": dataset.split_strategy,
+            "cv_folds": int(source_config.get("cv_folds", 5)),
+            "timeout_seconds": float(source_config.get("timeout_seconds", 300)),
+            "hypothesis": f"SOP {command.sop_id} v{command.sop_version} on new data",
+            "optimization_direction": "sop_retrain",
+            "intended_changes": (),
+            "retention_request": [],
+        }
+
         # Execute training — delegate to TrainingRunCoordinator like exploration
         executor = (
             self.training_executor_factory()
             if self.training_executor_factory is not None
             else SubprocessTrainingExecutor()
         )
-        import tempfile
-        split_path = Path(tempfile.mktemp(suffix=".csv"))
-        split_path.write_text("sample_id,split\n", encoding="utf-8")
 
         prepared = run_repo.prepare_instance(
             spec=InstancePreparationSpec(
@@ -942,15 +972,13 @@ class DomainCore:
                 random_seed=source_instance.random_seed,
                 parent_instance_id=None,
                 parent_instance_fingerprint=None,
-                configuration=dict(source_instance.metrics),
-                environment=source_instance.environment_fingerprint
-                and {"fingerprint": source_instance.environment_fingerprint}
-                or {},
+                configuration=configuration,
+                environment=source_environment,
             ),
             code_revision=run_repo.load_code_revision(
                 retrain_run_id, source_code.code_fingerprint,
             ),
-            split_path=split_path,
+            split_path=source_split_path,
             actor_id=connection.actor_id,
             capacity=repository.capacity,
         )
@@ -1087,9 +1115,13 @@ class DomainCore:
             )
 
         # 3. success → link a pseudo-instance reference
-        #    (Full Run/Instance creation via RunRepository requires plan/approval
-        #    context — the notebook reproduction path creates a synthetic link
-        #    that the SOP flow can verify.)
+        #    KNOWN LIMITATION (P0-C4): Full Run/Instance creation via RunRepository
+        #    requires a notebook execution protocol that produces standard
+        #    metrics/model/predictions artifacts. The current path creates a
+        #    synthetic link that SOP promotion cannot verify (load_instance fails).
+        #    Tracked for a follow-up issue: notebook→Instance needs its own
+        #    execution contract (like worker_contract) before it can feed
+        #    instance-to-sop. See docs/superpowers/specs/ notebook design.
         instance_id = f"nbinst_{command.asset_id[-12:]}"
         run_id = f"nbrep_{command.asset_id[-12:]}"
         nb_repo.link_instance(
